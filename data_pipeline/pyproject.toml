@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Data pipeline package for the FIT5120 CityFlow project."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "pandas>=2.2,<3.0",
+]
 
 [project.optional-dependencies]
 dev = [
