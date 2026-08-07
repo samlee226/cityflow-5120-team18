@@ -1,0 +1,2 @@
+-- CityFlow database schema placeholder.
+-- Add reviewed tables, constraints, and indexes in a future iteration.

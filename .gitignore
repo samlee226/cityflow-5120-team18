@@ -3,6 +3,8 @@ node_modules/
 vendor/
 .venv/
 venv/
+env/
+ENV/
 __pycache__/
 *.py[cod]
 
@@ -12,6 +14,8 @@ build/
 coverage/
 .next/
 out/
+.pytest_cache/
+.ipynb_checkpoints/
 
 # Environment files and secrets
 .env
@@ -28,3 +32,15 @@ Thumbs.db
 *.log
 *.swp
 *.tmp
+
+# Local and generated data pipeline outputs
+data_pipeline/data/raw/*
+!data_pipeline/data/raw/.gitkeep
+data_pipeline/data/interim/*
+!data_pipeline/data/interim/.gitkeep
+data_pipeline/data/processed/*
+!data_pipeline/data/processed/.gitkeep
+
+# Sample data is intentionally allowed in version control
+!data_pipeline/data/sample/
+!data_pipeline/data/sample/**
