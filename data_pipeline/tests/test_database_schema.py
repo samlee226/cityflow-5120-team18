@@ -54,11 +54,12 @@ def table_block(table: str) -> str:
 def test_migration_discovery_is_version_ordered() -> None:
     migrations = runner.discover_migrations(MIGRATIONS)
 
-    assert [migration.version for migration in migrations] == [1, 2, 3]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4]
     assert [migration.filename for migration in migrations] == [
         "001_extensions_and_core_tables.sql",
         "002_spatial_and_routing_tables.sql",
         "003_indexes_and_views.sql",
+        "004_live_pedestrian_ingestion.sql",
     ]
 
 
@@ -101,7 +102,7 @@ def test_tracking_returns_only_pending_migrations() -> None:
 
     pending = runner.validate_applied_migrations(migrations, applied)
 
-    assert [migration.version for migration in pending] == [2, 3]
+    assert [migration.version for migration in pending] == [2, 3, 4]
 
 
 def test_modified_applied_migration_is_rejected() -> None:
@@ -161,6 +162,9 @@ def test_required_extensions_and_tables_are_defined() -> None:
         "routing_edges",
         "sensor_network_map",
         "landmark_network_map",
+        "live_ingestion_runs",
+        "pedestrian_counts_minutely_live",
+        "pedestrian_counts_minutely_quarantine",
     ):
         assert f"create table {table}" in sql
 
@@ -286,6 +290,7 @@ def test_schema_sql_is_only_a_migration_wrapper() -> None:
     assert "\\ir migrations/001_extensions_and_core_tables.sql" in schema
     assert "\\ir migrations/002_spatial_and_routing_tables.sql" in schema
     assert "\\ir migrations/003_indexes_and_views.sql" in schema
+    assert "\\ir migrations/004_live_pedestrian_ingestion.sql" in schema
     assert "CREATE TABLE" not in schema.upper()
 
 

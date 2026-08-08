@@ -29,6 +29,11 @@ routing data and application-facing views:
 - `routing_edges_pgr` exposes the primary component in pgRouting form.
 - `hourly_crowd_features` reproduces the Python baseline feature formulas at
   query time.
+- `live_ingestion_runs`, `pedestrian_counts_minutely_live`, and the live
+  quarantine table provide incremental observability, strict sensor identity,
+  and auditable source conflicts.
+- `latest_sensor_crowd_levels` returns one frontend-oriented row per canonical
+  sensor for the latest completed 15-minute window.
 
 PostGIS geometries remain WGS84 (`EPSG:4326`). Metric lengths and snapping are
 calculated by the Python Spatial Layer in Melbourne's projected `EPSG:32755`
@@ -143,3 +148,22 @@ After loading, Elyas can expose read-only queries through FastAPI using views
 such as `hourly_crowd_features` and `routing_edges_pgr`. Keep database access in
 the backend service, use a least-privilege application role, parameterise all
 filters, paginate large responses, and never send credentials to the frontend.
+
+## Live ingestion schema
+
+Migration 004 adds the live-run log, UTC minutely curated facts, auditable
+quarantine records, and `latest_sensor_crowd_levels`. The live loader does not
+apply migrations automatically. Apply `python database/migrate.py` explicitly
+before running `python -m cityflow_pipeline.live_runner`.
+
+The curated natural key is `(sensor_id, sensing_datetime_utc)`. Unknown sensor
+IDs retain their original JSON payload in quarantine rather than weakening the
+foreign key. Conflicting source variants and different payloads for existing
+keys are also quarantined and never overwrite curated history. Missing minutes
+are absent, not zero.
+
+The view uses the latest completed 15-minute wall-clock window, reports the
+observed sum and a clearly named `hourly_equivalent_estimate`, and joins the
+matching Melbourne-local historical baseline. The historical `typical` band is
+named `medium` in this frontend-facing view. Older live history with no current
+window record is `stale`; a sensor with no live history is `no_data`.
