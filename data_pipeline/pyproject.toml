@@ -9,7 +9,10 @@ description = "Data pipeline package for the FIT5120 CityFlow project."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "networkx>=3.2,<4.0",
+  "numpy>=1.26,<3.0",
   "pandas>=2.2,<3.0",
+  "pyproj>=3.6,<4.0",
 ]
 
 [project.optional-dependencies]
