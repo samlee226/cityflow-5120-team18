@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cityflow-pipeline"
+version = "0.1.0"
+description = "Data pipeline package for the FIT5120 CityFlow project."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "networkx>=3.2,<4.0",
+  "numpy>=1.26,<3.0",
+  "pandas>=2.2,<3.0",
+  "pyproj>=3.6,<4.0",
+  "psycopg[binary]>=3.2,<4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cityflow_pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
