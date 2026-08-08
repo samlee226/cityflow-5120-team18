@@ -1,40 +1,8 @@
-<<<<<<< HEAD
+# ==============================
 # Dependencies
+# ==============================
 node_modules/
-vendor/
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-
-# Build and test output
-dist/
-build/
-coverage/
-.next/
-out/
-
-# Environment files and secrets
-.env
-.env.*
-!.env.example
-
-# IDE and operating system
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-
-# Logs and temporary files
-*.log
-*.swp
-*.tmp
-=======
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
-/.pnp
+.pnp
 .pnp.*
 .yarn/*
 !.yarn/patches
@@ -42,33 +10,86 @@ Thumbs.db
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
 
-# next.js
-/.next/
-/out/
+# ==============================
+# Next.js
+# ==============================
+.next/
+out/
+build/
 
-# production
-/build
 
-# misc
-.DS_Store
-*.pem
+# ==============================
+# Testing
+# ==============================
+coverage/
 
-# debug
+
+# ==============================
+# Environment files / Secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+
+# ==============================
+# Logs
+# ==============================
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
 
-# vercel
-.vercel
-
-# typescript
+# ==============================
+# TypeScript
+# ==============================
 *.tsbuildinfo
 next-env.d.ts
->>>>>>> 20bb54d (Added nextJS Frontend with maps Features)
+
+
+# ==============================
+# Vercel
+# ==============================
+.vercel/
+
+
+# ==============================
+# IDE / Editor
+# ==============================
+.vscode/
+.idea/
+
+
+# ==============================
+# Operating System Files
+# ==============================
+.DS_Store
+Thumbs.db
+
+
+# ==============================
+# Local / Generated Development Files
+# ==============================
+Microsoft/
+.claude/
+
+
+# ==============================
+# Python / Flask Backend
+# ==============================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+
+# ==============================
+# Temporary Files
+# ==============================
+*.tmp
+*.temp
+*.swp
+*.swo
