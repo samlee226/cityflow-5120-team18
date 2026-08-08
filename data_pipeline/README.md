@@ -67,3 +67,59 @@ For local development, create an isolated database, apply migrations, run a dry
 run, perform the real load, and check table/view counts before allowing an API
 to use it. The loader does not create databases, apply migrations, delete stale
 snapshot rows, calculate spatial distances, or ingest the minutely live feed.
+
+## Historical V1 end-to-end runner
+
+The runner connects the completed Week 3 layers without writing intermediate
+files:
+
+```text
+Raw CSV -> extract -> clean -> validate -> transform
+        -> crowd baseline/features -> spatial network -> PostgreSQL/PostGIS
+```
+
+Prerequisites:
+
+- create and activate the project virtual environment;
+- make the four historical CSV files available under a local ignored raw-data
+  directory;
+- configure `DATABASE_URL`, `CITYFLOW_DATABASE_URL`, or the supported
+  `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` variables;
+- apply migrations 001-003 to the target database with
+  `python database/migrate.py` before running the pipeline; and
+- confirm PostGIS and pgRouting are installed in that database.
+
+Run the historical pipeline from the repository root:
+
+```bash
+python -m cityflow_pipeline.runner \
+  --raw-data-dir data_pipeline/data/raw
+```
+
+Exercise the full computation and loading path without retaining database rows:
+
+```bash
+python -m cityflow_pipeline.runner \
+  --raw-data-dir data_pipeline/data/raw \
+  --dry-run
+```
+
+Emit structured JSON for local logs or later EC2 automation:
+
+```bash
+python -m cityflow_pipeline.runner \
+  --raw-data-dir data_pipeline/data/raw \
+  --json
+```
+
+The result reports stage timings, validation and spatial summaries, hourly-pass
+chunk metrics, baseline metrics, per-table load counts, warnings, and the
+persisted pipeline-run ID. Hourly data is re-read through fresh iterators for
+validation, baseline construction, and feature-enriched loading; the complete
+hourly dataset is never concatenated into one DataFrame.
+
+This command handles historical V1 data only. It deliberately excludes
+`pedestrian_counts_minutely.csv`, does not call the live API, does not apply or
+change migrations, and does not create interim or processed data files. Live
+ingestion, AWS scheduling, and EC2 deployment remain later infrastructure work.
+Raw source data remains local and ignored by Git.
