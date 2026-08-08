@@ -126,3 +126,20 @@ starting a version of the API that requires the new schema.
 6. never recompute the schema or silently modify migration history.
 
 No migration in this directory loads application or real raw data.
+
+## Loading processed CityFlow data
+
+Run `python database/migrate.py` against the intended database before calling
+the loading layer. The loader verifies migrations 001-003 plus the `postgis`
+and `pgrouting` extensions and refuses to continue when they are missing.
+
+Use an isolated database for development and tests. The default load is a
+non-destructive, idempotent upsert; it does not replace a snapshot or delete
+rows absent from the incoming dataset. Routing UUIDs are stable pipeline keys,
+while `routing_nodes.id` and `routing_edges.id` remain database-generated
+BIGINT values used by pgRouting.
+
+After loading, Elyas can expose read-only queries through FastAPI using views
+such as `hourly_crowd_features` and `routing_edges_pgr`. Keep database access in
+the backend service, use a least-privilege application role, parameterise all
+filters, paginate large responses, and never send credentials to the frontend.
