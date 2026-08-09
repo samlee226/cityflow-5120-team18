@@ -1,14 +1,15 @@
 """
-GET /api/routes
+POST /api/routes
 
 Runs pgRouting's Dijkstra shortest-path over routing_edges_pgr and
 returns the resulting path, including geometry so the frontend can
-draw it on a map.
+draw it on a map. Pure distance-based routing -- see low_crowd_routing.py
+for the crowd-penalised variant.
 
-The network has no direction restriction (walking is bidirectional), 
-and cost/reverse_cost both hold the positive metric edge length. 
-So, this query passes both columns and uses directed => false, 
-rather than a one-way cost column.
+The network has no direction
+restriction (walking is bidirectional), and cost/reverse_cost both
+hold the positive metric edge length. So this query passes both
+columns and uses directed => false, rather than a one-way cost column.
 
 Geometry note: each edge's stored geometry has a fixed direction, but
 a path can traverse it either way. We orient each edge's geometry to
@@ -17,16 +18,16 @@ source/target against the path's current node) before merging steps
 into a single continuous line -- otherwise the merged route could
 visually double back on itself at reversed edges.
 
-All inputs are passed as bound parameters ($1, $2), never string-
-interpolated into the query.
+All inputs are passed as bound parameters, never string-interpolated
+into the query.
 """
 
 import json
-from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException
 
 from app.core.db import get_pool
+from app.core.geo import merge_line_geometries
 from app.models.routing import RouteRequest, RouteResponse, RouteStep
 
 router = APIRouter(prefix="/api/routes", tags=["routing"])
@@ -57,25 +58,6 @@ _DIJKSTRA_WITH_GEOMETRY_SQL = """
     LEFT JOIN routing_edges_pgr e ON e.id = p.edge
     ORDER BY p.seq;
 """
-
-
-def _merge_line_geometries(coord_lists: List[List[List[float]]]) -> Optional[dict]:
-    """Concatenate ordered LineString coordinate arrays into one, dropping
-    a duplicated vertex where consecutive segments share an endpoint."""
-    if not coord_lists:
-        return None
-
-    merged: List[List[float]] = []
-    for coords in coord_lists:
-        if merged and merged[-1] == coords[0]:
-            merged.extend(coords[1:])
-        else:
-            merged.extend(coords)
-
-    if len(merged) < 2:
-        return None
-
-    return {"type": "LineString", "coordinates": merged}
 
 
 @router.post("", response_model=RouteResponse)
@@ -116,5 +98,5 @@ async def get_route(request: RouteRequest) -> RouteResponse:
         end_node=request.end_node,
         total_cost=steps[-1].agg_cost,
         steps=steps,
-        route_geometry=_merge_line_geometries(edge_coord_lists),
+        route_geometry=merge_line_geometries(edge_coord_lists),
     )
