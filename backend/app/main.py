@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import crowd_conditions, routing
+from app.api.routes import crowd_conditions, live_crowd, routing
 from app.core.db import connect_pool, disconnect_pool
 
 
@@ -33,6 +33,7 @@ app.add_middleware(
 
 app.include_router(routing.router)
 app.include_router(crowd_conditions.router)
+app.include_router(live_crowd.router)
 
 
 @app.get("/health", tags=["health"])

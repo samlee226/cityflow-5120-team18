@@ -4,10 +4,7 @@ GET /api/crowd-conditions
 Returns the most recent available hourly_crowd_features row per sensor,
 joined to sensors for display name and coordinates.
 
-"Current" = latest loaded observation per sensor, not necessarily
-matching the current wall-clock hour (data load lag is expected). This
-is a deliberate simplification -- revisit if the frontend later needs
-strict "this exact hour, or nothing" semantics.
+"Current" = latest loaded observation per sensor
 """
 
 from datetime import datetime, timezone

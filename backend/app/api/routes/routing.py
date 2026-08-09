@@ -5,10 +5,10 @@ Runs pgRouting's Dijkstra shortest-path over routing_edges_pgr and
 returns the resulting path, including geometry so the frontend can
 draw it on a map.
 
-Per the CityFlow database README: the network has no direction
-restriction (walking is bidirectional), and cost/reverse_cost both
-hold the positive metric edge length. So this query passes both
-columns and uses directed => false, rather than a one-way cost column.
+The network has no direction restriction (walking is bidirectional), 
+and cost/reverse_cost both hold the positive metric edge length. 
+So, this query passes both columns and uses directed => false, 
+rather than a one-way cost column.
 
 Geometry note: each edge's stored geometry has a fixed direction, but
 a path can traverse it either way. We orient each edge's geometry to
