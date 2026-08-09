@@ -54,13 +54,14 @@ def table_block(table: str) -> str:
 def test_migration_discovery_is_version_ordered() -> None:
     migrations = runner.discover_migrations(MIGRATIONS)
 
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6]
     assert [migration.filename for migration in migrations] == [
         "001_extensions_and_core_tables.sql",
         "002_spatial_and_routing_tables.sql",
         "003_indexes_and_views.sql",
         "004_live_pedestrian_ingestion.sql",
         "005_optional_sensor_installation_date.sql",
+        "006_source_relative_live_view.sql",
     ]
 
 
@@ -103,7 +104,7 @@ def test_tracking_returns_only_pending_migrations() -> None:
 
     pending = runner.validate_applied_migrations(migrations, applied)
 
-    assert [migration.version for migration in pending] == [2, 3, 4, 5]
+    assert [migration.version for migration in pending] == [2, 3, 4, 5, 6]
 
 
 def test_modified_applied_migration_is_rejected() -> None:
@@ -299,6 +300,7 @@ def test_schema_sql_is_only_a_migration_wrapper() -> None:
     assert "\\ir migrations/003_indexes_and_views.sql" in schema
     assert "\\ir migrations/004_live_pedestrian_ingestion.sql" in schema
     assert "\\ir migrations/005_optional_sensor_installation_date.sql" in schema
+    assert "\\ir migrations/006_source_relative_live_view.sql" in schema
     assert "CREATE TABLE" not in schema.upper()
 
 
