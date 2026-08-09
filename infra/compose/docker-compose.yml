@@ -1,0 +1,32 @@
+name: cityflow
+
+services:
+  db:
+    build:
+      context: ./db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:?Create .env from .env.example}"
+      POSTGRES_USER: "${POSTGRES_USER:?Create .env from .env.example}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Create .env from .env.example}"
+    # Bound to the loopback interface only. The database is reached through an
+    # SSH tunnel rather than being published to the internet.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256mb
+
+volumes:
+  # Named volume, not a bind mount: it survives `docker compose down` and
+  # container rebuilds. `down -v` destroys it along with the loaded data.
+  postgres_data:
