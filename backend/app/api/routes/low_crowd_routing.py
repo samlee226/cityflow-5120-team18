@@ -2,23 +2,27 @@
 POST /api/routes/low-crowd
 
 Same shape as /api/routes, but edges near a sensor currently reporting
-above-baseline crowd cost more to traverse. 
-Thus, pgr_dijkstra will trade some distance for
+above-baseline crowd (via latest_sensor_crowd_levels, migration 004)
+cost more to traverse -- so pgr_dijkstra will trade some distance for
 a calmer path when the numbers justify it.
 
-v1 design:
+v1 design (deliberately simple, revisit with the team as a next step):
   - An edge is "near" a sensor if that sensor's mapped node
     (sensor_network_map) is the edge's source or target, AND the snap
     was within the pipeline's own distance threshold
-    (within_snap_threshold).
+    (within_snap_threshold) -- we don't trust a poorly-snapped sensor
+    to represent that edge.
   - Only "fresh" live readings count. Stale or missing data does not
-    penalise an edge, no data is treated as neutral, not as "safe"
+    penalise an edge -- no data is treated as neutral, not as "safe"
     or "busy".
   - Penalty formula: cost *= 1 + CROWD_PENALTY_WEIGHT * max(crowd_ratio - 1, 0)
     A sensor at exactly its baseline (ratio 1.0) adds no penalty. One
     at double its baseline roughly doubles that edge's effective cost
     when CROWD_PENALTY_WEIGHT = 1.0 (see constant below).
-  - Crowding weight and "near" definition can and should be flexible for change.
+  - This is a real product decision, not just plumbing -- the weight,
+    the "near" definition, and whether landmarks/other signals should
+    also factor in are all open questions for the team, not just this
+    endpoint.
 """
 
 import json

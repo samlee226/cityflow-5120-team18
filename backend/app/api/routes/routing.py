@@ -6,7 +6,7 @@ returns the resulting path, including geometry so the frontend can
 draw it on a map. Pure distance-based routing -- see low_crowd_routing.py
 for the crowd-penalised variant.
 
-The network has no direction
+Per the CityFlow database README: the network has no direction
 restriction (walking is bidirectional), and cost/reverse_cost both
 hold the positive metric edge length. So this query passes both
 columns and uses directed => false, rather than a one-way cost column.
