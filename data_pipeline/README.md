@@ -1,6 +1,6 @@
 # CityFlow Data Pipeline
 
-This directory contains the initial Data Science workspace for the FIT5120 CityFlow project. It currently provides project structure only; data-source integrations, database operations, analytics, and AI functionality will be added in later iterations.
+This directory contains the FIT5120 CityFlow historical and bounded live pedestrian data pipelines. Both workflows preserve raw inputs, validate source contracts, and load PostgreSQL/PostGIS through explicit migrations.
 
 ## Structure
 
@@ -123,3 +123,43 @@ This command handles historical V1 data only. It deliberately excludes
 change migrations, and does not create interim or processed data files. Live
 ingestion, AWS scheduling, and EC2 deployment remain later infrastructure work.
 Raw source data remains local and ignored by Git.
+
+## Live pedestrian ingestion
+
+The live workflow reads a bounded UTC window from the official City of
+Melbourne dataset:
+
+`https://data.melbourne.vic.gov.au/api/explore/v2.1/catalog/datasets/pedestrian-counting-system-past-hour-counts-per-minute/records`
+
+Apply migration 004 before the first live run:
+
+```bash
+python database/migrate.py
+```
+
+Then run locally from the repository root:
+
+```bash
+python -m cityflow_pipeline.live_runner
+python -m cityflow_pipeline.live_runner --dry-run
+python -m cityflow_pipeline.live_runner --json
+```
+
+The first successful run requests at most the preceding two hours. Later runs
+start at the last successful source watermark minus a 30-minute overlap; the
+natural key and payload fingerprint make that overlap idempotent. Exact
+duplicates collapse. Conflicting duplicates, payload conflicts with an existing
+curated row, and unknown sensors are retained in
+`pedestrian_counts_minutely_quarantine` while valid rows continue loading.
+Curated records are never silently overwritten.
+
+Missing source minutes remain missing: the loader neither creates rows nor
+fills counts with zero. `latest_sensor_crowd_levels` therefore exposes null
+counts plus `no_data` or `stale` status rather than misleading zero traffic.
+Its hourly-equivalent value is explicitly an estimate based on the latest
+completed 15-minute wall-clock window. Historical `typical` is presented as
+frontend-friendly `medium`.
+
+This command is manual/local only. AWS or EC2 scheduling remains an IT and
+infrastructure task. Route scoring and consumption of the view remain backend
+integration tasks; they are outside this pipeline component.
