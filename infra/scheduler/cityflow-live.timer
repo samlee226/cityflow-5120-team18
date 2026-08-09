@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the CityFlow live ingestion every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+# Runs a missed interval after the instance is restarted, so stopping the
+# host overnight does not leave the live data silently stale.
+Persistent=true
+# Avoids every deployment hitting the upstream API on the exact same second.
+RandomizedDelaySec=30
+Unit=cityflow-live.service
+
+[Install]
+WantedBy=timers.target
