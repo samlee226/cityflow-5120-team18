@@ -214,7 +214,7 @@ def test_required_migration_and_extension_checks() -> None:
 
 def test_required_extension_checks() -> None:
     connection = ControlledConnection(
-        [ResultCursor([(1,), (2,), (3,)]), ResultCursor([("postgis",)])]
+        [ResultCursor([(1,), (2,), (3,), (5,)]), ResultCursor([("postgis",)])]
     )
     loader = PostgresLoader(connection=connection)  # type: ignore[arg-type]
     with pytest.raises(DatabaseLoadError, match="pgrouting"):
@@ -243,6 +243,26 @@ def test_sensor_upsert_uses_business_key_and_postgis_constructor() -> None:
     assert result.source_count == result.staged_count == 1
     assert loader.upserts[0]["conflict_columns"] == ("sensor_id",)
     assert "ST_GeomFromText" in repr(loader.upserts[0]["select_expressions"])
+
+
+def test_sensor_loader_normalises_missing_installation_date_to_sql_null() -> None:
+    class NullRecordingLoader(RecordingLoader):
+        def _copy_rows(self, stage_name: str, columns: object, rows: object) -> int:
+            copied = [
+                tuple(load_module._python_value(value) for value in row)
+                for row in rows  # type: ignore[union-attr]
+            ]
+            self.staged_rows.extend(copied)
+            return len(copied)
+
+    frame = sensor_frame()
+    frame.loc[0, "installation_date"] = pd.NaT
+    loader = NullRecordingLoader()
+
+    loader.load_sensors(frame)
+
+    installation_index = SENSOR_DIMENSION_COLUMNS.index("installation_date")
+    assert loader.staged_rows[0][installation_index] is None
 
 
 def test_sensor_direction_upsert_uses_composite_key() -> None:

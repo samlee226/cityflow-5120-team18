@@ -85,7 +85,7 @@ Prerequisites:
   directory;
 - configure `DATABASE_URL`, `CITYFLOW_DATABASE_URL`, or the supported
   `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` variables;
-- apply migrations 001-003 to the target database with
+- apply all pending migrations to the target database with
   `python database/migrate.py` before running the pipeline; and
 - confirm PostGIS and pgRouting are installed in that database.
 
@@ -111,6 +111,11 @@ python -m cityflow_pipeline.runner \
   --raw-data-dir data_pipeline/data/raw \
   --json
 ```
+
+The source schema still requires the `Installation_Date` column, but an
+individual sensor may omit this optional metadata. Blank, whitespace-only and
+CSV/pandas null values become a missing date and are loaded as SQL `NULL`;
+non-empty malformed dates fail cleaning. No date is inferred or filled.
 
 The result reports stage timings, validation and spatial summaries, hourly-pass
 chunk metrics, baseline metrics, per-table load counts, warnings, and the

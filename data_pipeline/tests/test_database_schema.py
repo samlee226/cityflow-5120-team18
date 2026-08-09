@@ -54,12 +54,13 @@ def table_block(table: str) -> str:
 def test_migration_discovery_is_version_ordered() -> None:
     migrations = runner.discover_migrations(MIGRATIONS)
 
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5]
     assert [migration.filename for migration in migrations] == [
         "001_extensions_and_core_tables.sql",
         "002_spatial_and_routing_tables.sql",
         "003_indexes_and_views.sql",
         "004_live_pedestrian_ingestion.sql",
+        "005_optional_sensor_installation_date.sql",
     ]
 
 
@@ -102,7 +103,7 @@ def test_tracking_returns_only_pending_migrations() -> None:
 
     pending = runner.validate_applied_migrations(migrations, applied)
 
-    assert [migration.version for migration in pending] == [2, 3, 4]
+    assert [migration.version for migration in pending] == [2, 3, 4, 5]
 
 
 def test_modified_applied_migration_is_rejected() -> None:
@@ -200,6 +201,12 @@ def test_core_tables_contain_pipeline_output_columns() -> None:
             assert re.search(rf"\b{re.escape(column)}\b", block)
 
 
+def test_sensor_installation_date_is_made_nullable_by_forward_migration() -> None:
+    sql = normalized_sql()
+
+    assert "alter table sensors alter column installation_date drop not null" in sql
+
+
 def test_hourly_and_baseline_business_keys_are_unique() -> None:
     hourly = re.sub(r"\s+", " ", table_block("pedestrian_counts_hourly"))
     baseline = re.sub(r"\s+", " ", table_block("crowd_baselines"))
@@ -291,6 +298,7 @@ def test_schema_sql_is_only_a_migration_wrapper() -> None:
     assert "\\ir migrations/002_spatial_and_routing_tables.sql" in schema
     assert "\\ir migrations/003_indexes_and_views.sql" in schema
     assert "\\ir migrations/004_live_pedestrian_ingestion.sql" in schema
+    assert "\\ir migrations/005_optional_sensor_installation_date.sql" in schema
     assert "CREATE TABLE" not in schema.upper()
 
 

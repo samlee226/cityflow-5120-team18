@@ -140,6 +140,21 @@ def _dates(series: pd.Series, field: str) -> pd.Series:
     return values
 
 
+def _optional_dates(series: pd.Series, field: str) -> pd.Series:
+    """Parse optional ISO dates while distinguishing missing from malformed values."""
+
+    text = series.astype("string").str.strip()
+    missing = text.isna() | text.eq("")
+    values = pd.to_datetime(
+        text.mask(missing, pd.NA), format="%Y-%m-%d", errors="coerce"
+    )
+    invalid = ~missing & values.isna()
+    if invalid.any():
+        rows = list(series.index[invalid][:5])
+        raise DataCleaningError(f"{field} contains invalid dates at rows {rows}")
+    return values
+
+
 def _coordinates(
     series: pd.Series,
     field: str,
@@ -217,7 +232,7 @@ def clean_pedestrian_sensors(frame: pd.DataFrame) -> SensorCleaningResult:
                 source["Sensor_Description"], "Sensor_Description"
             ),
             "sensor_name": _required_text(source["Sensor_Name"], "Sensor_Name"),
-            "installation_date": _dates(
+            "installation_date": _optional_dates(
                 source["Installation_Date"], "Installation_Date"
             ),
             "note": _nullable_text(source["Note"]),

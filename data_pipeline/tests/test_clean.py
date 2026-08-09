@@ -102,6 +102,37 @@ def test_clean_sensors_returns_canonical_and_direction_tables() -> None:
     assert result.sensor_directions["direction_1_label"].tolist() == ["North", "South"]
 
 
+@pytest.mark.parametrize(
+    "missing_value",
+    ["", "   ", None, pd.NA, pd.NaT, float("nan")],
+)
+def test_clean_sensors_allows_missing_installation_date_without_mutation(
+    missing_value: object,
+) -> None:
+    frame = sensor_frame().iloc[[0]].copy()
+    frame["Location_ID"] = 42
+    frame["Installation_Date"] = frame["Installation_Date"].astype("object")
+    frame.loc[frame.index[0], "Installation_Date"] = missing_value
+    before = frame.copy(deep=True)
+
+    result = clean_pedestrian_sensors(frame)
+
+    assert result.canonical_sensors["sensor_id"].tolist() == [42]
+    assert pd.isna(result.canonical_sensors.loc[0, "installation_date"])
+    assert pd.api.types.is_datetime64_any_dtype(
+        result.canonical_sensors["installation_date"]
+    )
+    assert_frame_equal(frame, before)
+
+
+def test_clean_sensors_preserves_valid_installation_date() -> None:
+    frame = sensor_frame().iloc[[0]].copy()
+
+    cleaned = clean_pedestrian_sensors(frame).canonical_sensors
+
+    assert cleaned.loc[0, "installation_date"] == pd.Timestamp("2020-02-29")
+
+
 def test_clean_sensors_is_deterministic_for_shuffled_input() -> None:
     original = clean_pedestrian_sensors(sensor_frame())
     shuffled = clean_pedestrian_sensors(

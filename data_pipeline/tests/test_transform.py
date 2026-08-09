@@ -139,6 +139,19 @@ def test_transform_canonical_sensors_returns_database_ready_dimension() -> None:
     assert WGS84_SRID == 4326
 
 
+def test_transform_canonical_sensors_preserves_missing_installation_date() -> None:
+    source = canonical_sensors()
+    source.loc[source["sensor_id"].eq(1), "installation_date"] = pd.NaT
+    before = source.copy(deep=True)
+
+    transformed = transform_canonical_sensors(source)
+
+    assert pd.isna(
+        transformed.loc[transformed["sensor_id"].eq(1), "installation_date"].iloc[0]
+    )
+    assert_frame_equal(source, before)
+
+
 def test_sensor_wkt_uses_longitude_before_latitude() -> None:
     transformed = transform_canonical_sensors(canonical_sensors())
 

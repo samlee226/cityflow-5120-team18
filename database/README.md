@@ -17,7 +17,8 @@ routing data and application-facing views:
 
 - `pipeline_runs` records pipeline status, source fingerprints, row counts and
   bounded error/metadata details.
-- `sensors`, `sensor_directions` and `landmarks` store transformed dimensions.
+- `sensors`, `sensor_directions` and `landmarks` store transformed dimensions;
+  sensor installation date is optional metadata and may be SQL `NULL`.
 - `pedestrian_counts_hourly` stores historical hourly facts in Melbourne local
   `timestamp without time zone`; it is not UTC.
 - `crowd_baselines` stores one descriptive baseline per sensor, ISO weekday and
@@ -135,7 +136,7 @@ No migration in this directory loads application or real raw data.
 ## Loading processed CityFlow data
 
 Run `python database/migrate.py` against the intended database before calling
-the loading layer. The loader verifies migrations 001-003 plus the `postgis`
+the loading layer. The historical loader verifies migrations 001-003 and 005 plus the `postgis`
 and `pgrouting` extensions and refuses to continue when they are missing.
 
 Use an isolated database for development and tests. The default load is a
