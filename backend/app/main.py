@@ -3,7 +3,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import crowd_conditions, live_crowd, low_crowd_routing, network, routing
+from app.api.routes import (
+    crowd_conditions,
+    crowd_trend,
+    live_crowd,
+    low_crowd_routing,
+    network,
+    routing,
+)
 from app.core.db import connect_pool, disconnect_pool
 
 
@@ -35,6 +42,7 @@ app.include_router(routing.router)
 app.include_router(low_crowd_routing.router)
 app.include_router(network.router)
 app.include_router(crowd_conditions.router)
+app.include_router(crowd_trend.router)
 app.include_router(live_crowd.router)
 
 
