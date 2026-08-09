@@ -36,7 +36,7 @@ from cityflow_pipeline.transform import (
 from cityflow_pipeline.validate import HistoricalValidationReport
 
 
-REQUIRED_MIGRATION_VERSIONS: Final = (1, 2, 3)
+REQUIRED_MIGRATION_VERSIONS: Final = (1, 2, 3, 5)
 LOAD_TABLE_ORDER: Final = (
     "sensors",
     "sensor_directions",

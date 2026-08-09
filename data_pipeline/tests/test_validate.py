@@ -122,6 +122,21 @@ def test_invalid_canonical_sensor_rules(mutator: object, code: str) -> None:
     assert code in issue_codes(report)
 
 
+def test_missing_sensor_installation_date_is_valid_but_column_is_required() -> None:
+    frame = canonical_sensors()
+    frame.loc[1, "installation_date"] = pd.NaT
+
+    report = validate_canonical_sensors(frame)
+    missing_column_report = validate_canonical_sensors(
+        frame.drop(columns="installation_date")
+    )
+
+    assert report.passed
+    assert "sensor.invalid_installation_date" not in issue_codes(report)
+    assert "schema.missing_columns" in issue_codes(missing_column_report)
+    assert not missing_column_report.passed
+
+
 def test_invalid_sensor_installation_date_is_reported() -> None:
     frame = canonical_sensors()
     frame["installation_date"] = frame["installation_date"].astype("object")

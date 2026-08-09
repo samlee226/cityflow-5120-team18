@@ -9,3 +9,4 @@
 \ir migrations/002_spatial_and_routing_tables.sql
 \ir migrations/003_indexes_and_views.sql
 \ir migrations/004_live_pedestrian_ingestion.sql
+\ir migrations/005_optional_sensor_installation_date.sql
