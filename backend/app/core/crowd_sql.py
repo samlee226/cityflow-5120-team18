@@ -56,3 +56,45 @@ effective_sensor_crowd AS (
     LEFT JOIN historical_latest h ON h.sensor_id = l.sensor_id
 )
 """.strip()
+
+
+def build_edge_nearby_ratio_cte(radius_m: float) -> str:
+    """
+    Builds on EFFECTIVE_SENSOR_CROWD_CTE to add edge_nearby_ratio: one row
+    per edge that has at least one sensor with a known (non-NULL) ratio
+    within radius_m metres, using PostGIS ST_DWithin on geography.
+
+    Aggregation rule when multiple sensors are in range: MAX(ratio) is
+    used -- the most cautious choice, since a road bordered by both a
+    calm and a very crowded sensor is treated as crowded, not averaged
+    down. This is a deliberate, documented choice, not an arbitrary
+    default -- surface it in any response that uses this CTE so
+    consumers don't have to read the SQL to know it.
+
+    An edge with NO row in edge_nearby_ratio (not just ratio <= 1.0) means
+    "no sensor with known data was in range at all" -- callers should
+    treat that as unknown, not as confirmed-low-crowd. Distinguish this
+    from an edge that has a row but effective_crowd_ratio is exactly at
+    or below baseline, which IS a known, confirmed-calm reading.
+
+    radius_m is a Python-side constant, never user input, so it's safe
+    to interpolate directly into the SQL text here.
+    """
+    return f"""
+{EFFECTIVE_SENSOR_CROWD_CTE},
+edge_nearby_ratio AS (
+    SELECT
+        e.id,
+        MAX(esc.effective_crowd_ratio) AS max_ratio
+    FROM routing_edges_pgr e
+    JOIN sensors s
+        ON ST_DWithin(
+            s.geometry::geography,
+            e.geometry::geography,
+            {radius_m}
+        )
+    JOIN effective_sensor_crowd esc ON esc.sensor_id = s.sensor_id
+    WHERE esc.effective_crowd_ratio IS NOT NULL
+    GROUP BY e.id
+)
+""".strip()
