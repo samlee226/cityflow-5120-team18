@@ -16,7 +16,7 @@ from cityflow_pipeline.live import (
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--initial-lookback-hours", type=float, default=2.0)
+    parser.add_argument("--bootstrap-minutes", type=int, default=90)
     parser.add_argument("--overlap-minutes", type=int, default=30)
     parser.add_argument("--request-budget", type=int, default=250)
     parser.add_argument("--connect-timeout", type=float, default=5.0)
@@ -61,7 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = LiveIngestionConfig(
             database_url=args.database_url,
-            initial_lookback_hours=args.initial_lookback_hours,
+            bootstrap_minutes=args.bootstrap_minutes,
             overlap_minutes=args.overlap_minutes,
             request_budget=args.request_budget,
             connect_timeout_seconds=args.connect_timeout,

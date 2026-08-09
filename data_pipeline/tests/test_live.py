@@ -94,6 +94,23 @@ def test_successful_bounded_pagination_and_timeouts() -> None:
     assert [call[1]["offset"] for call in transport.calls] == [0, 1]
     assert all(call[2:] == (3, 7) for call in transport.calls)
     assert all("sensing_datetime" in str(call[1]["where"]) for call in transport.calls)
+    assert not transport.responses
+
+
+def test_latest_source_timestamp_uses_one_record_query() -> None:
+    transport = FakeTransport(
+        [response(102_410, [{"sensing_datetime": END.isoformat()}])]
+    )
+    client = LiveApiClient(LiveIngestionConfig(), transport=transport)
+
+    assert client.latest_source_timestamp() == END
+    assert client.request_count == 1
+    assert transport.calls[0][1] == {
+        "limit": 1,
+        "offset": 0,
+        "select": "sensing_datetime",
+        "order_by": "sensing_datetime DESC",
+    }
 
 
 def test_timestamp_partition_splitting_is_non_overlapping() -> None:
@@ -260,14 +277,22 @@ def test_utc_to_melbourne_conversion_handles_standard_time() -> None:
     assert record.iso_weekday == 7
 
 
-def test_first_run_and_watermark_overlap_windows() -> None:
-    config = LiveIngestionConfig(initial_lookback_hours=2, overlap_minutes=30)
-    assert determine_live_window(END, None, config) == (START, END)
+def test_bounded_bootstrap_and_watermark_overlap_windows() -> None:
+    config = LiveIngestionConfig(bootstrap_minutes=90, overlap_minutes=30)
+    assert determine_live_window(END, None, config) == (
+        END - timedelta(minutes=90),
+        END + timedelta(seconds=1),
+    )
     watermark = END - timedelta(minutes=20)
     assert determine_live_window(END, watermark, config) == (
         END - timedelta(minutes=50),
-        END,
+        END + timedelta(seconds=1),
     )
+
+
+def test_bootstrap_cannot_exceed_ninety_minutes() -> None:
+    with pytest.raises(ValueError, match="90-minute safety bound"):
+        LiveIngestionConfig(bootstrap_minutes=91)
 
 
 def test_result_is_json_serialisable() -> None:
@@ -341,6 +366,108 @@ def test_source_records_bypass_http_and_caller_connection_stays_open(fake_databa
     assert not connection.closed
 
 
+def test_delayed_api_anchors_bootstrap_to_latest_source_timestamp(
+    fake_database: type[FakeDatabase],
+) -> None:
+    latest = END - timedelta(hours=3)
+    row = payload(timestamp=(latest - timedelta(minutes=1)).isoformat())
+    transport = FakeTransport(
+        [
+            response(102_410, [{"sensing_datetime": latest.isoformat()}]),
+            response(1, [row]),
+        ]
+    )
+    client = LiveApiClient(LiveIngestionConfig(), transport=transport)
+
+    result = run_live_ingestion(
+        LiveIngestionConfig(),
+        connection=FakeConnection(),  # type: ignore[arg-type]
+        api_client=client,
+        now=lambda: END,
+    )
+
+    assert result.window_start_utc == latest - timedelta(minutes=90)
+    assert result.window_end_utc == latest + timedelta(seconds=1)
+    assert result.request_count == 2
+    where = str(transport.calls[1][1]["where"])
+    assert "sensing_datetime" in where
+    assert (latest - timedelta(minutes=90)).isoformat(timespec="seconds") in where
+
+
+def test_upgrade_from_legacy_migration004_watermark_caps_catch_up_window(
+    fake_database: type[FakeDatabase],
+) -> None:
+    FakeDatabase.watermark_value = END - timedelta(days=1)
+    row = payload(timestamp=(END - timedelta(minutes=1)).isoformat())
+    transport = FakeTransport(
+        [
+            response(102_410, [{"sensing_datetime": END.isoformat()}]),
+            response(1, [row]),
+        ]
+    )
+    client = LiveApiClient(LiveIngestionConfig(), transport=transport)
+
+    result = run_live_ingestion(
+        client.config,
+        connection=FakeConnection(),  # type: ignore[arg-type]
+        api_client=client,
+    )
+
+    assert result.window_start_utc == END - timedelta(minutes=90)
+    assert result.window_end_utc == END + timedelta(seconds=1)
+    where = str(transport.calls[1][1]["where"])
+    assert (END - timedelta(minutes=90)).isoformat(timespec="seconds") in where
+    assert (END - timedelta(days=1, minutes=30)).isoformat(timespec="seconds") not in where
+    assert result.request_count == 2
+
+
+def test_discovery_and_pagination_share_request_budget(
+    fake_database: type[FakeDatabase],
+) -> None:
+    first = payload(timestamp=(END - timedelta(minutes=2)).isoformat())
+    transport = FakeTransport(
+        [
+            response(102_410, [{"sensing_datetime": END.isoformat()}]),
+            response(2, [first]),
+        ]
+    )
+    client = LiveApiClient(
+        LiveIngestionConfig(page_limit=1, request_budget=2),
+        transport=transport,
+    )
+
+    with pytest.raises(LiveIngestionError, match="budget exhausted"):
+        run_live_ingestion(
+            client.config,
+            connection=FakeConnection(),  # type: ignore[arg-type]
+            api_client=client,
+        )
+    assert client.request_count == 2
+
+
+def test_duplicate_rerun_is_reported_as_unchanged(
+    fake_database: type[FakeDatabase],
+) -> None:
+    connection = FakeConnection()
+    first = run_live_ingestion(
+        LiveIngestionConfig(),
+        connection=connection,  # type: ignore[arg-type]
+        source_records=[payload()],
+        now=lambda: END,
+    )
+    FakeDatabase.load_result = (0, 1, 0, "succeeded")
+    second = run_live_ingestion(
+        LiveIngestionConfig(),
+        connection=connection,  # type: ignore[arg-type]
+        source_records=[payload()],
+        now=lambda: END,
+    )
+
+    assert first.records_loaded == 1 and first.records_unchanged == 0
+    assert second.records_loaded == 0 and second.records_unchanged == 1
+    assert second.request_count == 0
+
+
 def test_loader_owned_connection_closes(fake_database: type[FakeDatabase]) -> None:
     connection = FakeConnection()
     run_live_ingestion(
@@ -393,9 +520,13 @@ def test_connection_errors_redact_credentials(fake_database: type[FakeDatabase])
 
 def test_cli_parsing_and_json_output(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     args = live_runner._build_parser().parse_args(
-        ["--dry-run", "--json", "--request-budget", "12", "--overlap-minutes", "15"]
+        [
+            "--dry-run", "--json", "--request-budget", "12",
+            "--overlap-minutes", "15", "--bootstrap-minutes", "60",
+        ]
     )
     assert args.dry_run and args.json_output and args.request_budget == 12
+    assert args.bootstrap_minutes == 60
     result = LiveIngestionResult(None, "dry_run", START, END, None, 0, 0, 0, 0, 0, 0, 0, 0.01, True)
     monkeypatch.setattr(live_runner, "run_live_ingestion", lambda config: result)
     assert live_runner.main(["--dry-run", "--json"]) == 0
@@ -412,6 +543,20 @@ def test_migration_defines_quarantine_conflicts_strict_fk_and_view() -> None:
     assert "then 'stale'" in sql_text and "then 'no_data'" in sql_text
     assert "else 'medium'" in sql_text
     assert "observed_15m_count * 4" in sql_text
+
+
+def test_forward_migration_anchors_view_to_latest_source_and_reports_age() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    sql_text = (
+        repository / "database/migrations/006_source_relative_live_view.sql"
+    ).read_text().lower()
+
+    assert "create or replace view latest_sensor_crowd_levels" in sql_text
+    assert "max(live.sensing_datetime_utc)" in sql_text
+    assert "latest_source_timestamp_utc" in sql_text
+    assert "data_age" in sql_text
+    for status in ("fresh", "delayed", "stale"):
+        assert f"'{status}'" in sql_text
 
 
 def test_historical_pipeline_contract_remains_unchanged() -> None:

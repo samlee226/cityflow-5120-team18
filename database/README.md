@@ -163,8 +163,9 @@ foreign key. Conflicting source variants and different payloads for existing
 keys are also quarantined and never overwrite curated history. Missing minutes
 are absent, not zero.
 
-The view uses the latest completed 15-minute wall-clock window, reports the
-observed sum and a clearly named `hourly_equivalent_estimate`, and joins the
-matching Melbourne-local historical baseline. The historical `typical` band is
-named `medium` in this frontend-facing view. Older live history with no current
-window record is `stale`; a sensor with no live history is `no_data`.
+Migration 006 moves the view to the latest completed 15-minute window relative
+to the latest available source timestamp. It reports the observed sum, a clearly
+named `hourly_equivalent_estimate`, source timestamp, and `data_age`, and joins
+the matching Melbourne-local historical baseline. Status is `fresh` through 15
+minutes, `delayed` through 60 minutes, then `stale`; a sensor with no live
+history is `no_data`. The historical `typical` band remains `medium`.

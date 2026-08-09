@@ -136,7 +136,7 @@ Melbourne dataset:
 
 `https://data.melbourne.vic.gov.au/api/explore/v2.1/catalog/datasets/pedestrian-counting-system-past-hour-counts-per-minute/records`
 
-Apply migration 004 before the first live run:
+Apply all pending migrations, including migration 006, before a live run:
 
 ```bash
 python database/migrate.py
@@ -150,20 +150,25 @@ python -m cityflow_pipeline.live_runner --dry-run
 python -m cityflow_pipeline.live_runner --json
 ```
 
-The first successful run requests at most the preceding two hours. Later runs
-start at the last successful source watermark minus a 30-minute overlap; the
-natural key and payload fingerprint make that overlap idempotent. Exact
-duplicates collapse. Conflicting duplicates, payload conflicts with an existing
-curated row, and unknown sensors are retained in
-`pedestrian_counts_minutely_quarantine` while valid rows continue loading.
-Curated records are never silently overwritten.
+Each API run first requests the latest available `sensing_datetime`. The first
+successful run uses a source-anchored bootstrap window of at most 90 minutes.
+Later runs start at the last successful source watermark minus a 30-minute
+overlap and end immediately after the latest source timestamp. The natural key
+and payload fingerprint make that overlap idempotent. A legacy watermark older
+than the source-anchored 90-minute safety window is capped at that window rather
+than triggering an unbounded catch-up. Exact duplicates collapse.
+Conflicting duplicates, payload conflicts with an existing curated row, and
+unknown sensors are retained in `pedestrian_counts_minutely_quarantine` while
+valid rows continue loading. Curated records are never silently overwritten.
 
 Missing source minutes remain missing: the loader neither creates rows nor
 fills counts with zero. `latest_sensor_crowd_levels` therefore exposes null
-counts plus `no_data` or `stale` status rather than misleading zero traffic.
+counts and explicit data-age status rather than misleading zero traffic.
 Its hourly-equivalent value is explicitly an estimate based on the latest
-completed 15-minute wall-clock window. Historical `typical` is presented as
-frontend-friendly `medium`.
+completed 15-minute window relative to source availability. `data_age` compares
+each sensor's latest reading with database time; status is `fresh` through 15
+minutes, `delayed` through 60 minutes, and then `stale` (`no_data` means no live
+history). Historical `typical` is presented as frontend-friendly `medium`.
 
 This command is manual/local only. AWS or EC2 scheduling remains an IT and
 infrastructure task. Route scoring and consumption of the view remain backend

@@ -33,6 +33,7 @@ LIVE_API_URL: Final = (
     "https://data.melbourne.vic.gov.au/api/explore/v2.1/catalog/datasets/"
     f"{LIVE_DATASET_ID}/records"
 )
+LIVE_TIMESTAMP_FIELD: Final = "sensing_datetime"
 MELBOURNE: Final = ZoneInfo("Australia/Melbourne")
 RETRYABLE_HTTP_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
 
@@ -69,7 +70,7 @@ class LiveIngestionConfig:
 
     database_url: str | None = None
     contract: LiveSourceContract = field(default_factory=LiveSourceContract)
-    initial_lookback_hours: float = 2.0
+    bootstrap_minutes: int = 90
     overlap_minutes: int = 30
     request_budget: int = 250
     page_limit: int = 100
@@ -86,7 +87,7 @@ class LiveIngestionConfig:
 
     def __post_init__(self) -> None:
         positive_numbers = {
-            "initial_lookback_hours": self.initial_lookback_hours,
+            "bootstrap_minutes": self.bootstrap_minutes,
             "request_budget": self.request_budget,
             "page_limit": self.page_limit,
             "maximum_partition_rows": self.maximum_partition_rows,
@@ -103,6 +104,8 @@ class LiveIngestionConfig:
             raise ValueError("page_limit cannot exceed the API maximum of 100")
         if self.maximum_partition_rows > 10_000:
             raise ValueError("maximum_partition_rows cannot exceed 10000")
+        if self.bootstrap_minutes > 90:
+            raise ValueError("bootstrap_minutes cannot exceed the 90-minute safety bound")
         if isinstance(self.overlap_minutes, bool) or self.overlap_minutes < 0:
             raise ValueError("overlap_minutes must be a non-negative integer")
         if self.backoff_base_seconds < 0 or self.backoff_max_seconds < 0:
@@ -313,15 +316,15 @@ class LiveApiClient:
 
     def _page(self, start: datetime, end: datetime, offset: int) -> _Page:
         where = (
-            f'sensing_datetime >= "{_api_timestamp(start)}" '
-            f'and sensing_datetime < "{_api_timestamp(end)}"'
+            f'{LIVE_TIMESTAMP_FIELD} >= "{_api_timestamp(start)}" '
+            f'and {LIVE_TIMESTAMP_FIELD} < "{_api_timestamp(end)}"'
         )
         response = self._request(
             {
                 "limit": self.config.page_limit,
                 "offset": offset,
                 "where": where,
-                "order_by": "sensing_datetime ASC, location_id ASC",
+                "order_by": f"{LIVE_TIMESTAMP_FIELD} ASC, location_id ASC",
             }
         )
         try:
@@ -339,6 +342,35 @@ class LiveApiClient:
         if len(results) > self.config.page_limit:
             raise LiveIngestionError("live API page exceeded the requested limit")
         return _Page(total, tuple(dict(row) for row in results))
+
+    def latest_source_timestamp(self) -> datetime:
+        """Return the latest timestamp exposed by the source using one bounded request."""
+
+        response = self._request(
+            {
+                "limit": 1,
+                "offset": 0,
+                "select": LIVE_TIMESTAMP_FIELD,
+                "order_by": f"{LIVE_TIMESTAMP_FIELD} DESC",
+            }
+        )
+        try:
+            decoded = json.loads(response.body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise LiveIngestionError("live API returned invalid JSON") from error
+        if not isinstance(decoded, dict):
+            raise LiveIngestionError("live API response must be a JSON object")
+        total = decoded.get("total_count")
+        results = decoded.get("results")
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise LiveIngestionError("live API total_count must be a non-negative integer")
+        if not isinstance(results, list) or any(not isinstance(row, dict) for row in results):
+            raise LiveIngestionError("live API results must be a list of objects")
+        if total == 0:
+            raise LiveIngestionError("live API contains no source records")
+        if len(results) != 1:
+            raise LiveIngestionError("live API latest timestamp query returned no record")
+        return _parse_timestamp(results[0].get(LIVE_TIMESTAMP_FIELD))
 
     def _fetch_partition(
         self, start: datetime, end: datetime
@@ -612,19 +644,22 @@ def _api_timestamp(value: datetime) -> str:
 
 
 def determine_live_window(
-    now_utc: datetime,
+    latest_source_timestamp_utc: datetime,
     last_successful_watermark: datetime | None,
     config: LiveIngestionConfig,
 ) -> tuple[datetime, datetime]:
-    """Return the first-run lookback or overlapped incremental half-open window."""
+    """Return a source-anchored bootstrap or overlapped incremental window."""
 
-    end = _aware_utc(now_utc, "now_utc")
+    latest = _aware_utc(latest_source_timestamp_utc, "latest_source_timestamp_utc")
+    end = latest + timedelta(seconds=1)
+    bootstrap_start = latest - timedelta(minutes=config.bootstrap_minutes)
     if last_successful_watermark is None:
-        start = end - timedelta(hours=config.initial_lookback_hours)
+        start = bootstrap_start
     else:
-        start = _aware_utc(
+        overlapped_watermark = _aware_utc(
             last_successful_watermark, "last_successful_watermark"
         ) - timedelta(minutes=config.overlap_minutes)
+        start = max(overlapped_watermark, bootstrap_start)
     if start >= end:
         raise LiveIngestionError("calculated live ingestion window is empty")
     return start, end
@@ -645,8 +680,12 @@ class _LiveDatabase:
             }
         except Exception as error:
             raise LiveIngestionError("database schema validation failed") from error
-        if 4 not in versions:
-            raise LiveIngestionError("required database migration 004 is missing")
+        missing = sorted({4, 6} - versions)
+        if missing:
+            formatted = ", ".join(f"{version:03d}" for version in missing)
+            raise LiveIngestionError(
+                f"required database migration(s) {formatted} are missing"
+            )
 
     def watermark(self) -> datetime | None:
         row = self.connection.execute(
@@ -903,7 +942,14 @@ def run_live_ingestion(
     client = api_client or LiveApiClient(settings)
     try:
         database.validate_schema()
-        start, end = determine_live_window(now(), database.watermark(), settings)
+        latest_source_timestamp = (
+            _aware_utc(now(), "now_utc")
+            if source_records is not None
+            else client.latest_source_timestamp()
+        )
+        start, end = determine_live_window(
+            latest_source_timestamp, database.watermark(), settings
+        )
         run_id = database.start_run(start, end)
         try:
             payloads = (
