@@ -1,77 +1,91 @@
 """
 POST /api/routes/low-crowd
 
-Same shape as /api/routes, but edges near a sensor currently reporting
-above-baseline crowd (via latest_sensor_crowd_levels, migration 004)
-cost more to traverse -- so pgr_dijkstra will trade some distance for
-a calmer path when the numbers justify it.
+Same shape as /api/routes, but edges near sensors currently showing
+above-baseline crowd cost more to traverse -- so pgr_dijkstra trades
+some distance for a calmer path when the numbers justify it.
 
-v1 design (deliberately simple, revisit with the team as a next step):
-  - An edge is "near" a sensor if that sensor's mapped node
-    (sensor_network_map) is the edge's source or target, AND the snap
-    was within the pipeline's own distance threshold
-    (within_snap_threshold) -- we don't trust a poorly-snapped sensor
-    to represent that edge.
-  - Only "fresh" live readings count. Stale or missing data does not
-    penalise an edge -- no data is treated as neutral, not as "safe"
-    or "busy".
-  - Penalty formula: cost *= 1 + CROWD_PENALTY_WEIGHT * max(crowd_ratio - 1, 0)
-    A sensor at exactly its baseline (ratio 1.0) adds no penalty. One
-    at double its baseline roughly doubles that edge's effective cost
-    when CROWD_PENALTY_WEIGHT = 1.0 (see constant below).
-  - This is a real product decision, not just plumbing -- the weight,
-    the "near" definition, and whether landmarks/other signals should
-    also factor in are all open questions for the team, not just this
-    endpoint.
+v2 design: proximity-based, not exact-node-based.
+
+The first version only penalised an edge if a sensor was mapped to
+that *exact* routing node via sensor_network_map. Since there are far
+more path nodes than sensors, that meant almost no real route ever
+passed through a mapped node -- crowd data had no practical effect on
+most routing results, even when a sensor right next to the path was
+badly crowded.
+
+This version instead asks, per edge: "is any sensor within
+PROXIMITY_RADIUS_M metres of this edge's actual geometry?" using
+PostGIS's ST_DWithin on geography (accurate real-world metres, not
+degrees). An edge takes the highest crowd_ratio among all sensors in
+range. This spreads each sensor's influence across a realistic walking
+radius instead of a single point, so most routes near a busy sensor
+should now actually reflect it -- not just routes that happen to hit
+one exact node.
+
+Crowd data source still follows the team's fallback rule (see
+app/core/crowd_sql.py): fresh/delayed live data is used as-is; stale
+or no_data falls back to the most recent historical row for that
+sensor.
+
+Both PROXIMITY_RADIUS_M and CROWD_PENALTY_WEIGHT are open design
+choices worth revisiting with the team once there's real usage to
+tune against.
 """
 
 import json
 
 from fastapi import APIRouter, HTTPException
 
+from app.core.crowd_sql import EFFECTIVE_SENSOR_CROWD_CTE
 from app.core.db import get_pool
 from app.core.geo import merge_line_geometries
 from app.models.routing import RouteRequest, RouteResponse, RouteStep
 
 router = APIRouter(prefix="/api/routes/low-crowd", tags=["routing"])
 
-# Tunable: how strongly current crowding discourages an edge. 1.0 means
-# "an edge at 2x baseline crowd costs roughly 2x as much to walk".
+# How strongly current crowding discourages an edge. 1.0 means "an edge
+# near a sensor at 2x baseline crowd costs roughly 2x as much to walk".
 CROWD_PENALTY_WEIGHT = 1.0
 
+# How far (metres) a sensor's influence reaches from its own location
+# to nearby edges. Chosen as a rough "can probably see/hear this area
+# while walking" distance -- not derived from any measured data.
+PROXIMITY_RADIUS_M = 150
+
 # Passed as a bind parameter (not string-interpolated) into pgr_dijkstra's
-# edges-SQL argument, so we never have to hand-escape the 'fresh' literal
-# inside a string that itself gets embedded in another string.
+# edges-SQL argument, so the embedded quotes never need manual escaping.
 _LOW_CROWD_EDGES_SQL = f"""
+    WITH {EFFECTIVE_SENSOR_CROWD_CTE},
+    edge_nearby_ratio AS (
+        SELECT
+            e.id,
+            MAX(esc.effective_crowd_ratio) AS max_ratio
+        FROM routing_edges_pgr e
+        JOIN sensors s
+            ON ST_DWithin(
+                s.geometry::geography,
+                e.geometry::geography,
+                {PROXIMITY_RADIUS_M}
+            )
+        JOIN effective_sensor_crowd esc ON esc.sensor_id = s.sensor_id
+        WHERE esc.effective_crowd_ratio IS NOT NULL
+        GROUP BY e.id
+    )
     SELECT
         e.id,
         e.source,
         e.target,
         e.cost * (
-            1 + {CROWD_PENALTY_WEIGHT} * GREATEST(
-                GREATEST(
-                    COALESCE(src_crowd.crowd_ratio, 1.0),
-                    COALESCE(tgt_crowd.crowd_ratio, 1.0)
-                ) - 1, 0
-            )
+            1 + {CROWD_PENALTY_WEIGHT}
+              * GREATEST(COALESCE(enr.max_ratio, 1.0) - 1, 0)
         ) AS cost,
         e.reverse_cost * (
-            1 + {CROWD_PENALTY_WEIGHT} * GREATEST(
-                GREATEST(
-                    COALESCE(src_crowd.crowd_ratio, 1.0),
-                    COALESCE(tgt_crowd.crowd_ratio, 1.0)
-                ) - 1, 0
-            )
+            1 + {CROWD_PENALTY_WEIGHT}
+              * GREATEST(COALESCE(enr.max_ratio, 1.0) - 1, 0)
         ) AS reverse_cost
     FROM routing_edges_pgr e
-    LEFT JOIN sensor_network_map src_map
-        ON src_map.node_id = e.source AND src_map.within_snap_threshold
-    LEFT JOIN latest_sensor_crowd_levels src_crowd
-        ON src_crowd.sensor_id = src_map.sensor_id AND src_crowd.data_status = 'fresh'
-    LEFT JOIN sensor_network_map tgt_map
-        ON tgt_map.node_id = e.target AND tgt_map.within_snap_threshold
-    LEFT JOIN latest_sensor_crowd_levels tgt_crowd
-        ON tgt_crowd.sensor_id = tgt_map.sensor_id AND tgt_crowd.data_status = 'fresh'
+    LEFT JOIN edge_nearby_ratio enr ON enr.id = e.id
 """
 
 _DIJKSTRA_LOW_CROWD_SQL = """
