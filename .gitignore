@@ -6,6 +6,7 @@ venv/
 env/
 ENV/
 __pycache__/
+.python-version
 *.py[cod]
 
 # Build and test output
