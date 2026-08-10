@@ -11,3 +11,5 @@
 \ir migrations/004_live_pedestrian_ingestion.sql
 \ir migrations/005_optional_sensor_installation_date.sql
 \ir migrations/006_source_relative_live_view.sql
+\ir migrations/007_live_retention_indexes.sql
+\ir migrations/008_edge_sensor_map.sql

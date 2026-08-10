@@ -48,6 +48,16 @@ def _human_output(result: LiveIngestionResult) -> str:
             f"Loaded: {result.records_loaded}",
             f"Unchanged: {result.records_unchanged}",
             f"Quarantined: {result.records_quarantined}",
+            "Retention cleanup: "
+            + (
+                "not run"
+                if result.retention_cleanup is None
+                else (
+                    f"live={result.retention_cleanup.live_deleted}, "
+                    f"quarantine={result.retention_cleanup.quarantine_deleted}, "
+                    f"runs={result.retention_cleanup.runs_deleted}"
+                )
+            ),
             f"Requests: {result.request_count}",
             f"Elapsed seconds: {result.elapsed_seconds:.3f}",
         )
@@ -59,7 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = _build_parser().parse_args(argv)
     try:
-        config = LiveIngestionConfig(
+        config = LiveIngestionConfig.from_environment(
             database_url=args.database_url,
             bootstrap_minutes=args.bootstrap_minutes,
             overlap_minutes=args.overlap_minutes,

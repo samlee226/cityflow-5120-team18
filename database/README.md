@@ -27,6 +27,8 @@ routing data and application-facing views:
   adding `BIGINT IDENTITY` IDs required by pgRouting.
 - `sensor_network_map` and `landmark_network_map` connect application locations
   to routing-node integer IDs and preserve snap quality flags.
+- `edge_sensor_map` stores the fixed, metric proximity between every routing
+  edge and each canonical sensor within the configured radius.
 - `routing_edges_pgr` exposes the primary component in pgRouting form.
 - `hourly_crowd_features` reproduces the Python baseline feature formulas at
   query time.
@@ -38,7 +40,9 @@ routing data and application-facing views:
 
 PostGIS geometries remain WGS84 (`EPSG:4326`). Metric lengths and snapping are
 calculated by the Python Spatial Layer in Melbourne's projected `EPSG:32755`
-CRS before values are stored.
+CRS before values are stored. The edge-to-sensor backfill instead casts the
+existing WGS84 geometries to PostGIS `geography`, so `ST_DWithin` and
+`ST_Distance` both operate in metres and measure against the full LineString.
 
 ## Environment setup
 
@@ -66,6 +70,56 @@ For local Docker development, use the database settings from the separately
 managed Compose environment and connect through its loopback PostgreSQL port.
 Re-running the command is safe: applied checksums are verified and unchanged
 migrations are skipped.
+
+## Edge-to-sensor mapping
+
+Migration 008 adds `edge_sensor_map(edge_id, sensor_id, distance_m)`. Its
+composite primary key is the Backend lookup index by edge, and the secondary
+`(sensor_id, edge_id)` index supports reverse inspection. Both foreign keys
+use `ON DELETE CASCADE`, matching the derived-map lifecycle.
+
+Run the one-time local rebuild only after routing edges and sensors have been
+loaded:
+
+```bash
+python database/migrate.py
+python -m cityflow_pipeline.edge_sensor_map --radius-m 150
+python -m cityflow_pipeline.edge_sensor_map --radius-m 150 --verify-only
+```
+
+The rebuild uses one transaction and an advisory transaction lock. It stages
+all qualifying pairs with `ST_DWithin`, stores the full-LineString
+`ST_Distance`, atomically replaces the derived table, verifies the result, and
+runs `ANALYZE edge_sensor_map`. A failure rolls back to the previous complete
+map. Rerunning produces no duplicate pairs. The `--verify-only` command makes
+no changes and reports total rows, distinct edges and sensors, edge coverage,
+minimum/maximum distance, radius violations (with a `0.01` metre numerical
+tolerance), duplicate pairs, orphan references, and a deterministic sample.
+
+The mapping is independent of live-data availability. Never rebuild it from
+the 15-minute Live Pipeline; rebuild only when routing geometry, sensor
+locations, or the proximity radius changes.
+
+After the matching code is deployed, Sam can run on EC2:
+
+```bash
+cd /home/ubuntu/cityflow
+set -a
+source infra/compose/.env
+set +a
+source .venv/bin/activate
+python database/migrate.py
+python -m cityflow_pipeline.edge_sensor_map --radius-m 150
+python -m cityflow_pipeline.edge_sensor_map --radius-m 150 --verify-only
+```
+
+These EC2 commands modify the shared database. They must run only after code
+deployment and an approved maintenance window; they are not executed as part
+of local development.
+
+Backend contract: read `edge_id`, `sensor_id`, and `distance_m`, join this
+fixed map with the latest crowd ratios, and do not execute the 150-metre
+spatial relationship on every route request.
 
 For a brand-new manually managed database, `psql` can apply the convenience
 wrapper:
@@ -169,3 +223,8 @@ named `hourly_equivalent_estimate`, source timestamp, and `data_age`, and joins
 the matching Melbourne-local historical baseline. Status is `fresh` through 15
 minutes, `delayed` through 60 minutes, then `stale`; a sensor with no live
 history is `no_data`. The historical `typical` band remains `medium`.
+
+Migration 007 adds retention indexes for quarantine `detected_at` and completed
+live ingestion runs. The existing live timestamp index already supports curated
+24-hour cleanup. Cleanup deletes curated rows first, quarantine rows second, and
+only then completed audit runs that have no remaining foreign-key references.
