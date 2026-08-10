@@ -54,7 +54,7 @@ def table_block(table: str) -> str:
 def test_migration_discovery_is_version_ordered() -> None:
     migrations = runner.discover_migrations(MIGRATIONS)
 
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert [migration.filename for migration in migrations] == [
         "001_extensions_and_core_tables.sql",
         "002_spatial_and_routing_tables.sql",
@@ -63,6 +63,7 @@ def test_migration_discovery_is_version_ordered() -> None:
         "005_optional_sensor_installation_date.sql",
         "006_source_relative_live_view.sql",
         "007_live_retention_indexes.sql",
+        "008_edge_sensor_map.sql",
     ]
 
 
@@ -105,7 +106,7 @@ def test_tracking_returns_only_pending_migrations() -> None:
 
     pending = runner.validate_applied_migrations(migrations, applied)
 
-    assert [migration.version for migration in pending] == [2, 3, 4, 5, 6, 7]
+    assert [migration.version for migration in pending] == [2, 3, 4, 5, 6, 7, 8]
 
 
 def test_modified_applied_migration_is_rejected() -> None:
@@ -168,6 +169,7 @@ def test_required_extensions_and_tables_are_defined() -> None:
         "live_ingestion_runs",
         "pedestrian_counts_minutely_live",
         "pedestrian_counts_minutely_quarantine",
+        "edge_sensor_map",
     ):
         assert f"create table {table}" in sql
 
@@ -294,6 +296,20 @@ def test_indexes_support_hourly_routing_and_mapping_queries() -> None:
     assert "on landmark_network_map (node_id)" in sql
 
 
+def test_edge_sensor_map_contract_and_indexes() -> None:
+    block = re.sub(r"\s+", " ", table_block("edge_sensor_map"))
+    sql = normalized_sql()
+
+    assert "edge_id bigint not null" in block
+    assert "sensor_id bigint not null" in block
+    assert "distance_m double precision not null" in block
+    assert "primary key (edge_id, sensor_id)" in block
+    assert "references routing_edges(id) on delete cascade" in block
+    assert "references sensors(sensor_id) on delete cascade" in block
+    assert "check (distance_m >= 0)" in block
+    assert "on edge_sensor_map (sensor_id, edge_id)" in sql
+
+
 def test_schema_sql_is_only_a_migration_wrapper() -> None:
     schema = (DATABASE / "schema.sql").read_text(encoding="utf-8")
     assert "\\ir migrations/001_extensions_and_core_tables.sql" in schema
@@ -303,6 +319,7 @@ def test_schema_sql_is_only_a_migration_wrapper() -> None:
     assert "\\ir migrations/005_optional_sensor_installation_date.sql" in schema
     assert "\\ir migrations/006_source_relative_live_view.sql" in schema
     assert "\\ir migrations/007_live_retention_indexes.sql" in schema
+    assert "\\ir migrations/008_edge_sensor_map.sql" in schema
     assert "CREATE TABLE" not in schema.upper()
 
 
