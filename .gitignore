@@ -103,6 +103,7 @@ env/
 ENV/
 __pycache__/
 **/__pycache__/
+.python-version
 *.py[cod]
 .pytest_cache/
 
