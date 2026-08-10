@@ -187,3 +187,107 @@ main{position:relative}.hero-illustration{position:absolute;z-index:1;top:108px;
 @media(max-width:1120px){.hero-shell{grid-template-columns:1fr;gap:44px;padding:78px 0}.hero-shell>.planner-card{width:min(100%,720px);min-height:0;justify-self:center}.hero-shell>.intro-panel{max-width:900px}.intro-panel h1{font-size:clamp(3.7rem,8vw,5.6rem)}.hero-parallax:after{right:10%}}
 @media(max-width:680px){.hero-shell{gap:32px;padding:64px 0}.hero-shell>.planner-card{width:100%;padding:25px 22px}.intro-panel h1{font-size:clamp(3rem,13vw,4.25rem)}.hero-shell:after{inset:2% -12%;background-size:42px 42px,42px 42px,auto,auto;opacity:.58}.hero-parallax:before{left:2%;right:-20%;opacity:.55}.hero-parallax:after{right:3%;top:47%;opacity:.6}}
 @media(prefers-reduced-motion:reduce){.hero-parallax:before,.hero-parallax:after,.hero-shell:after{animation:none!important}}
+
+/* Soft blue-teal palette — visual-only overrides */
+:root{
+  --bg:#edf6f6;
+  --surface:#fbfefe;
+  --soft:#e5f2f2;
+  --blue-soft:#dceced;
+  --ink:#163c44;
+  --text:#35565c;
+  --muted:#6d8589;
+  --line:#c7e1e2;
+  --sage:#5e9fa3;
+  --sage-dark:#2d747a;
+  --blue:#4f8f96;
+  --lavender:#78aeb1;
+  --lavender-soft:#e2f0f1;
+  --shadow:0 16px 42px rgba(35,91,96,.1);
+}
+body{background:linear-gradient(145deg,#f8fcfc 0%,#e8f3f3 48%,#f2f8f8 100%)}
+.ambient-background{background:#eaf4f4}
+.ambient-mesh{background:radial-gradient(circle at 12% 18%,rgba(143,191,193,.72),transparent 35%),radial-gradient(circle at 87% 12%,rgba(171,209,211,.68),transparent 36%),radial-gradient(circle at 73% 80%,rgba(199,225,226,.82),transparent 39%),radial-gradient(circle at 18% 82%,rgba(105,166,170,.43),transparent 38%),linear-gradient(125deg,#dceced 0%,#c7e1e2 30%,#eef7f7 58%,#abd1d3 100%)}
+.ambient-blob.lavender{background:radial-gradient(circle,#78aeb1 0%,#abd1d3 42%,transparent 72%)}
+.ambient-blob.blue{background:radial-gradient(circle,#6aa7ab 0%,#b6d8da 44%,transparent 73%)}
+.ambient-blob.pink{background:radial-gradient(circle,#8fbfc1 0%,#c7e1e2 43%,transparent 72%)}
+.ambient-blob.teal{background:radial-gradient(circle,#56999e 0%,#abd1d3 44%,transparent 72%)}
+.ambient-blob.peach{background:radial-gradient(circle,#a8cdcf 0%,#dceced 43%,transparent 72%)}
+.wave-one,.wave-two{background:linear-gradient(105deg,transparent 5%,#79afb2 30%,#8fbfc1 56%,#c7e1e2 82%,transparent 97%)}
+.orb-one,.orb-two{color:#8fbfc1;background:radial-gradient(circle at 35% 30%,#f4ffff,#8fbfc1 30%,rgba(79,143,150,.16) 70%)}
+.ambient-contrast{background:linear-gradient(180deg,rgba(248,253,253,.28),rgba(241,249,249,.48)),radial-gradient(ellipse at 50% 42%,rgba(255,255,255,.55) 0%,rgba(255,255,255,.25) 45%,rgba(255,255,255,.08) 78%)}
+.app-header{background:rgba(248,253,253,.9);border-color:rgba(171,209,211,.82);box-shadow:0 4px 24px rgba(35,91,96,.06)}
+.brand-mark{color:#2d747a;background:linear-gradient(145deg,#c7e1e2,#e8f4f4);border-color:#abd1d3}
+.app-header nav a:hover,.app-header nav a:focus-visible{color:#245f65;background:#e3f0f1}
+.hero-brand-mark{background:linear-gradient(145deg,#4f9298,#75aeb2 53%,#8fbfc1);box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 12px 30px rgba(48,112,118,.2),0 0 38px rgba(143,191,193,.22)}
+.hero-brand-main h2,.intro-panel h1 span{background:linear-gradient(105deg,#163c44 5%,#286971 34%,#4f8f96 62%,#2d747a 84%,#163c44);background-size:220% auto;background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero-brand-subtitle{color:#47757b!important}
+.hero-orb-one{background:radial-gradient(circle at 35% 32%,rgba(199,225,226,.92),rgba(111,174,178,.62) 40%,rgba(79,143,150,.25) 68%,transparent 75%)}
+.hero-orb-two{background:radial-gradient(circle at 42% 38%,rgba(171,209,211,.84),rgba(103,163,167,.48) 42%,rgba(143,191,193,.22) 68%,transparent 75%)}
+.hero-ribbon{background:linear-gradient(100deg,transparent,#8fbfc166,#abd1d388,#c7e1e299,transparent)}
+.hero-shell:after{background-image:linear-gradient(rgba(79,143,150,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(79,143,150,.06) 1px,transparent 1px),radial-gradient(circle at 72% 22%,rgba(143,191,193,.3),transparent 18%),radial-gradient(circle at 32% 82%,rgba(171,209,211,.3),transparent 21%)}
+.hero-shell .planner-card{background:linear-gradient(145deg,rgba(251,254,254,.94),rgba(231,243,243,.84)) padding-box,linear-gradient(135deg,#8fbfc1,#abd1d3,#c7e1e2) border-box;box-shadow:0 2px 4px rgba(26,68,73,.05),0 22px 64px rgba(46,105,110,.14),0 0 42px rgba(143,191,193,.14)}
+.hero-shell .planner-card:before{background:radial-gradient(circle,rgba(143,191,193,.34),rgba(199,225,226,.2) 44%,transparent 70%)}
+.planner-card,.panel{border-color:rgba(171,209,211,.84)}
+.section-heading h2{color:#21474f}
+.session-card,.navigation-card{background:linear-gradient(120deg,#e5f2f2,#f2f8f8);border-color:#c1dddd}
+.planner-card input{background:#fbfefe;border-color:#c7e1e2}.planner-card input:hover{border-color:#8fbfc1}.planner-card input:focus,.hero-shell .planner-card input:focus{border-color:#639da1;box-shadow:0 0 0 4px rgba(143,191,193,.22)}
+.chip{background:#f8fcfc;border-color:#c7e1e2}.chip:hover{background:#e7f2f3;border-color:#9ec8ca}.chip.is-selected,.hero-shell .chip.is-selected{color:#245f65;background:#dfeeee;border-color:#79afb2}
+.primary-action,.secondary-action{background:linear-gradient(135deg,#4f8f96,#77adb0);box-shadow:0 8px 20px rgba(55,125,131,.2)}.primary-action:hover,.secondary-action:hover{background:linear-gradient(135deg,#397b81,#5e9fa3)}
+.quiet-button{color:#2d747a;background:linear-gradient(120deg,#e2f0f1,#f0f7f7);border-color:#abd1d3}.quiet-button:hover{color:#245f65;background:#d7eaea}
+.map-panel{background:linear-gradient(180deg,#fbfefe,#eef7f7)}
+.google-map-shell{border-color:#e4f0f0;box-shadow:inset 0 0 0 1px #abd1d3}
+.route-badge,.soft-pill{color:#2d747a;background:linear-gradient(120deg,#dfeeee,#eef7f7);border-color:#8fbfc1}
+.map-layers-control,.crowd-legend,.crowd-info-card{color:#35565c;background:rgba(248,253,253,.9);border-color:rgba(171,209,211,.94);box-shadow:0 10px 28px rgba(32,82,87,.13)}
+.map-layer-list{border-color:rgba(199,225,226,.9)}.map-layer-toggle{color:#4f6d72}.map-layer-toggle:hover{background:rgba(220,236,237,.8)}.layer-switch{background:#c7dfe0}.map-layer-toggle input:checked+.layer-switch{background:#5e9fa3}
+.navigation-overlay,.map-status{background:rgba(248,253,253,.94);border-color:#c7e1e2;box-shadow:0 8px 25px rgba(32,82,87,.14)}
+:focus-visible{outline-color:rgba(79,143,150,.55)}
+
+/* Keep the primary landing-page typography solid black. */
+.hero-brand-main h2,
+.intro-panel h1 span{
+  color:#111;
+  background:none;
+  background-clip:border-box;
+  -webkit-background-clip:border-box;
+  -webkit-text-fill-color:#111;
+}
+
+/* Hero-only navigation: no container, and it scrolls away with the landing section. */
+.hero-nav{
+  position:absolute;
+  z-index:6;
+  top:22px;
+  right:0;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:clamp(18px,2.2vw,34px);
+}
+.hero-nav a{
+  padding:7px 2px;
+  color:#35565c;
+  font-size:.9rem;
+  font-weight:720;
+  text-decoration:none;
+  white-space:nowrap;
+  transition:color .18s ease,transform .18s ease;
+}
+.hero-nav a:hover,
+.hero-nav a:focus-visible{
+  color:#111;
+  transform:translateY(-1px);
+}
+.hero-shell{min-height:100vh}
+@media(max-width:680px){
+  .hero-shell{padding-top:116px}
+  .hero-nav{
+    top:22px;
+    left:0;
+    right:0;
+    justify-content:center;
+    gap:8px 18px;
+    flex-wrap:wrap;
+  }
+  .hero-nav a{font-size:.82rem}
+}
