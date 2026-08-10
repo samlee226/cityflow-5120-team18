@@ -18,6 +18,7 @@ from cityflow_pipeline.live import (
     LiveIngestionConfig,
     LiveIngestionError,
     LiveIngestionResult,
+    LiveRetentionCleanupResult,
     canonical_payload_fingerprint,
     determine_live_window,
     prepare_live_records,
@@ -74,6 +75,15 @@ class FakeTransport:
 
 START = datetime(2026, 8, 8, 10, tzinfo=UTC)
 END = datetime(2026, 8, 8, 12, tzinfo=UTC)
+CLEANUP_RESULT = LiveRetentionCleanupResult(
+    reference_time_utc=END,
+    live_cutoff_utc=END - timedelta(hours=24),
+    quarantine_cutoff_utc=END - timedelta(days=7),
+    run_cutoff_utc=END - timedelta(days=30),
+    live_deleted=0,
+    quarantine_deleted=0,
+    runs_deleted=0,
+)
 
 
 def test_successful_bounded_pagination_and_timeouts() -> None:
@@ -295,6 +305,33 @@ def test_bootstrap_cannot_exceed_ninety_minutes() -> None:
         LiveIngestionConfig(bootstrap_minutes=91)
 
 
+def test_retention_periods_load_from_environment() -> None:
+    config = LiveIngestionConfig.from_environment(
+        {
+            "CITYFLOW_LIVE_RETENTION_HOURS": "36",
+            "CITYFLOW_LIVE_QUARANTINE_RETENTION_DAYS": "8",
+            "CITYFLOW_LIVE_RUN_RETENTION_DAYS": "45",
+        }
+    )
+
+    assert config.live_retention_hours == 36
+    assert config.quarantine_retention_days == 8
+    assert config.run_retention_days == 45
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("CITYFLOW_LIVE_RETENTION_HOURS", "0"),
+        ("CITYFLOW_LIVE_QUARANTINE_RETENTION_DAYS", "invalid"),
+        ("CITYFLOW_LIVE_RUN_RETENTION_DAYS", "-1"),
+    ],
+)
+def test_invalid_retention_environment_is_rejected(name: str, value: str) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        LiveIngestionConfig.from_environment({name: value})
+
+
 def test_result_is_json_serialisable() -> None:
     result = LiveIngestionResult(
         "run", "succeeded", START, END, END - timedelta(minutes=1),
@@ -303,6 +340,93 @@ def test_result_is_json_serialisable() -> None:
     decoded = json.loads(json.dumps(result.to_dict(), allow_nan=False))
     assert decoded["status"] == "succeeded"
     assert decoded["max_source_timestamp_utc"].endswith("+00:00")
+
+
+class RetentionQueryResult:
+    def __init__(
+        self,
+        *,
+        row: tuple[object, ...] | None = None,
+        rowcount: int = -1,
+    ) -> None:
+        self.row = row
+        self.rowcount = rowcount
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self.row
+
+
+class RetentionConnection:
+    def __init__(self, delete_counts: list[int]) -> None:
+        self.delete_counts = list(delete_counts)
+        self.calls: list[tuple[str, tuple[object, ...] | None]] = []
+
+    def execute(
+        self,
+        statement: object,
+        parameters: tuple[object, ...] | None = None,
+    ) -> RetentionQueryResult:
+        query = " ".join(str(statement).split())
+        self.calls.append((query, parameters))
+        if query.startswith("SELECT CURRENT_TIMESTAMP"):
+            return RetentionQueryResult(row=(END, END - timedelta(hours=2)))
+        return RetentionQueryResult(rowcount=self.delete_counts.pop(0))
+
+
+def test_retention_cutoffs_counts_and_foreign_key_safe_order() -> None:
+    connection = RetentionConnection([3, 2, 1])
+    database = live._LiveDatabase(
+        connection,  # type: ignore[arg-type]
+        LiveIngestionConfig(
+            live_retention_hours=24,
+            quarantine_retention_days=7,
+            run_retention_days=30,
+        ),
+    )
+
+    result = database.cleanup_retention()
+
+    assert result.live_cutoff_utc == END - timedelta(hours=26)
+    assert result.quarantine_cutoff_utc == END - timedelta(days=7)
+    assert result.run_cutoff_utc == END - timedelta(days=30)
+    assert (result.live_deleted, result.quarantine_deleted, result.runs_deleted) == (
+        3,
+        2,
+        1,
+    )
+    deletes = connection.calls[1:]
+    assert "DELETE FROM pedestrian_counts_minutely_live" in deletes[0][0]
+    assert "DELETE FROM pedestrian_counts_minutely_quarantine" in deletes[1][0]
+    assert "DELETE FROM live_ingestion_runs" in deletes[2][0]
+    assert deletes[0][1] == (END - timedelta(hours=26),)
+    assert deletes[1][1] == (END - timedelta(days=7),)
+    assert deletes[2][1] == (END - timedelta(days=30),)
+    assert "NOT EXISTS" in deletes[2][0]
+    assert "pedestrian_counts_minutely_live" in deletes[2][0]
+    assert "pedestrian_counts_minutely_quarantine" in deletes[2][0]
+    assert "status <> 'running'" in deletes[2][0]
+
+
+def test_retention_cleanup_is_repeatable() -> None:
+    connection = RetentionConnection([3, 2, 1, 0, 0, 0])
+    database = live._LiveDatabase(
+        connection,  # type: ignore[arg-type]
+        LiveIngestionConfig(),
+    )
+
+    first = database.cleanup_retention()
+    second = database.cleanup_retention()
+
+    assert (first.live_deleted, first.quarantine_deleted, first.runs_deleted) == (
+        3,
+        2,
+        1,
+    )
+    assert (second.live_deleted, second.quarantine_deleted, second.runs_deleted) == (
+        0,
+        0,
+        0,
+    )
 
 
 class FakeConnection:
@@ -321,6 +445,7 @@ class FakeDatabase:
     watermark_value: datetime | None = None
     load_result = (1, 0, 0, "succeeded")
     load_error: BaseException | None = None
+    cleanup_calls = 0
 
     def __init__(self, connection: object, config: LiveIngestionConfig) -> None:
         self.connection = connection
@@ -336,6 +461,10 @@ class FakeDatabase:
     def fail_run(self, run_id: str, error: BaseException) -> None: self.failed = error
     def delete_run(self, run_id: str) -> None: self.deleted = True
 
+    def cleanup_retention(self) -> LiveRetentionCleanupResult:
+        type(self).cleanup_calls += 1
+        return CLEANUP_RESULT
+
     def load_batch(self, run_id: str, batch: object) -> tuple[int, int, int, str]:
         self.loaded_batch = batch
         if self.load_error:
@@ -349,6 +478,7 @@ def fake_database(monkeypatch: pytest.MonkeyPatch) -> type[FakeDatabase]:
     FakeDatabase.watermark_value = None
     FakeDatabase.load_result = (1, 0, 0, "succeeded")
     FakeDatabase.load_error = None
+    FakeDatabase.cleanup_calls = 0
     monkeypatch.setattr(live, "_LiveDatabase", FakeDatabase)
     return FakeDatabase
 
@@ -362,6 +492,8 @@ def test_source_records_bypass_http_and_caller_connection_stays_open(fake_databa
         now=lambda: END,
     )
     assert result.records_loaded == 1
+    assert result.retention_cleanup == CLEANUP_RESULT
+    assert FakeDatabase.cleanup_calls == 1
     assert result.request_count == 0
     assert not connection.closed
 
@@ -479,7 +611,9 @@ def test_loader_owned_connection_closes(fake_database: type[FakeDatabase]) -> No
     assert connection.closed
 
 
-def test_dry_run_rolls_back_and_removes_run(fake_database: type[FakeDatabase]) -> None:
+def test_dry_run_rolls_back_without_delete_or_cleanup(
+    fake_database: type[FakeDatabase],
+) -> None:
     connection = FakeConnection()
     result = run_live_ingestion(
         LiveIngestionConfig(dry_run=True),
@@ -489,7 +623,9 @@ def test_dry_run_rolls_back_and_removes_run(fake_database: type[FakeDatabase]) -
     )
     assert result.status == "dry_run"
     assert result.run_id is None
-    assert FakeDatabase.instances[-1].deleted
+    assert not FakeDatabase.instances[-1].deleted
+    assert FakeDatabase.cleanup_calls == 0
+    assert result.retention_cleanup is None
 
 
 def test_failed_run_is_recorded_separately(fake_database: type[FakeDatabase]) -> None:
@@ -557,6 +693,17 @@ def test_forward_migration_anchors_view_to_latest_source_and_reports_age() -> No
     assert "data_age" in sql_text
     for status in ("fresh", "delayed", "stale"):
         assert f"'{status}'" in sql_text
+
+
+def test_retention_migration_adds_missing_cleanup_indexes() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    sql_text = (
+        repository / "database/migrations/007_live_retention_indexes.sql"
+    ).read_text().lower()
+
+    assert "on pedestrian_counts_minutely_quarantine (detected_at)" in sql_text
+    assert "on live_ingestion_runs (completed_at)" in sql_text
+    assert "where status <> 'running'" in sql_text
 
 
 def test_historical_pipeline_contract_remains_unchanged() -> None:
