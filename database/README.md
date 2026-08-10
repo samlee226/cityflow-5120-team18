@@ -169,3 +169,8 @@ named `hourly_equivalent_estimate`, source timestamp, and `data_age`, and joins
 the matching Melbourne-local historical baseline. Status is `fresh` through 15
 minutes, `delayed` through 60 minutes, then `stale`; a sensor with no live
 history is `no_data`. The historical `typical` band remains `medium`.
+
+Migration 007 adds retention indexes for quarantine `detected_at` and completed
+live ingestion runs. The existing live timestamp index already supports curated
+24-hour cleanup. Cleanup deletes curated rows first, quarantine rows second, and
+only then completed audit runs that have no remaining foreign-key references.

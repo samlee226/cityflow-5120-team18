@@ -136,7 +136,7 @@ Melbourne dataset:
 
 `https://data.melbourne.vic.gov.au/api/explore/v2.1/catalog/datasets/pedestrian-counting-system-past-hour-counts-per-minute/records`
 
-Apply all pending migrations, including migration 006, before a live run:
+Apply all pending migrations, including migration 007, before a live run:
 
 ```bash
 python database/migrate.py
@@ -169,6 +169,26 @@ completed 15-minute window relative to source availability. `data_age` compares
 each sensor's latest reading with database time; status is `fresh` through 15
 minutes, `delayed` through 60 minutes, and then `stale` (`no_data` means no live
 history). Historical `typical` is presented as frontend-friendly `medium`.
+
+After a successful non-dry-run ingestion, retention cleanup runs in the same
+transaction as the new live load. Curated minutely records retain the latest 24
+hours by default, with the cutoff anchored to the newest
+`sensing_datetime_utc` already in PostgreSQL so delayed upstream data is not
+mistaken for expired data. Quarantine rows retain seven days by `detected_at`.
+Completed ingestion audit runs retain 30 days and are deleted only when neither
+curated nor quarantine rows still reference them. Deletion order is curated
+live rows, quarantine rows, then unreferenced audit runs.
+
+Override the positive-integer defaults through environment variables:
+
+```bash
+CITYFLOW_LIVE_RETENTION_HOURS=24
+CITYFLOW_LIVE_QUARANTINE_RETENTION_DAYS=7
+CITYFLOW_LIVE_RUN_RETENTION_DAYS=30
+```
+
+`--dry-run` performs API, validation and transactional load checks but rolls
+back its temporary audit/load work and never executes retention cleanup.
 
 This command is manual/local only. AWS or EC2 scheduling remains an IT and
 infrastructure task. Route scoring and consumption of the view remain backend

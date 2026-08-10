@@ -36,10 +36,30 @@ LIVE_API_URL: Final = (
 LIVE_TIMESTAMP_FIELD: Final = "sensing_datetime"
 MELBOURNE: Final = ZoneInfo("Australia/Melbourne")
 RETRYABLE_HTTP_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
+LIVE_RETENTION_HOURS_ENV: Final = "CITYFLOW_LIVE_RETENTION_HOURS"
+QUARANTINE_RETENTION_DAYS_ENV: Final = "CITYFLOW_LIVE_QUARANTINE_RETENTION_DAYS"
+RUN_RETENTION_DAYS_ENV: Final = "CITYFLOW_LIVE_RUN_RETENTION_DAYS"
 
 
 class LiveIngestionError(RuntimeError):
     """Raised when the live source, contract, or database load fails safely."""
+
+
+def _positive_environment_int(
+    environment: Mapping[str, str], name: str, default: int
+) -> int:
+    """Read one positive integer setting without accepting ambiguous values."""
+
+    raw = environment.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +103,9 @@ class LiveIngestionConfig:
     backoff_max_seconds: float = 8.0
     jitter_ratio: float = 0.2
     error_message_max_length: int = 1_000
+    live_retention_hours: int = 24
+    quarantine_retention_days: int = 7
+    run_retention_days: int = 30
     dry_run: bool = False
 
     def __post_init__(self) -> None:
@@ -96,6 +119,9 @@ class LiveIngestionConfig:
             "read_timeout_seconds": self.read_timeout_seconds,
             "maximum_attempts": self.maximum_attempts,
             "error_message_max_length": self.error_message_max_length,
+            "live_retention_hours": self.live_retention_hours,
+            "quarantine_retention_days": self.quarantine_retention_days,
+            "run_retention_days": self.run_retention_days,
         }
         for name, value in positive_numbers.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
@@ -112,6 +138,57 @@ class LiveIngestionConfig:
             raise ValueError("backoff values must be non-negative")
         if not 0 <= self.jitter_ratio <= 1:
             raise ValueError("jitter_ratio must be between zero and one")
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str] | None = None,
+        **overrides: object,
+    ) -> "LiveIngestionConfig":
+        """Build configuration with retention periods read from environment."""
+
+        values = os.environ if environment is None else environment
+        retention: dict[str, object] = {
+            "live_retention_hours": _positive_environment_int(
+                values, LIVE_RETENTION_HOURS_ENV, 24
+            ),
+            "quarantine_retention_days": _positive_environment_int(
+                values, QUARANTINE_RETENTION_DAYS_ENV, 7
+            ),
+            "run_retention_days": _positive_environment_int(
+                values, RUN_RETENTION_DAYS_ENV, 30
+            ),
+        }
+        retention.update(overrides)
+        return cls(**retention)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRetentionCleanupResult:
+    """Deterministic deletion metrics for one post-ingestion cleanup."""
+
+    reference_time_utc: datetime
+    live_cutoff_utc: datetime | None
+    quarantine_cutoff_utc: datetime
+    run_cutoff_utc: datetime
+    live_deleted: int
+    quarantine_deleted: int
+    runs_deleted: int
+
+    def to_dict(self) -> dict[str, object]:
+        """Return JSON-safe cleanup cutoffs and deletion counts."""
+
+        return {
+            "reference_time_utc": self.reference_time_utc.isoformat(),
+            "live_cutoff_utc": (
+                None if self.live_cutoff_utc is None else self.live_cutoff_utc.isoformat()
+            ),
+            "quarantine_cutoff_utc": self.quarantine_cutoff_utc.isoformat(),
+            "run_cutoff_utc": self.run_cutoff_utc.isoformat(),
+            "live_deleted": self.live_deleted,
+            "quarantine_deleted": self.quarantine_deleted,
+            "runs_deleted": self.runs_deleted,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +210,7 @@ class LiveIngestionResult:
     elapsed_seconds: float
     dry_run: bool = False
     warnings: tuple[str, ...] = ()
+    retention_cleanup: LiveRetentionCleanupResult | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return a deterministic mapping accepted by ``json.dumps``."""
@@ -157,6 +235,11 @@ class LiveIngestionResult:
             "elapsed_seconds": self.elapsed_seconds,
             "dry_run": self.dry_run,
             "warnings": list(self.warnings),
+            "retention_cleanup": (
+                None
+                if self.retention_cleanup is None
+                else self.retention_cleanup.to_dict()
+            ),
         }
 
 
@@ -680,7 +763,7 @@ class _LiveDatabase:
             }
         except Exception as error:
             raise LiveIngestionError("database schema validation failed") from error
-        missing = sorted({4, 6} - versions)
+        missing = sorted({4, 6, 7} - versions)
         if missing:
             formatted = ", ".join(f"{version:03d}" for version in missing)
             raise LiveIngestionError(
@@ -731,6 +814,90 @@ class _LiveDatabase:
             self.connection.execute(
                 "DELETE FROM live_ingestion_runs WHERE run_id = %s", (run_id,)
             )
+
+    def cleanup_retention(self) -> LiveRetentionCleanupResult:
+        """Delete expired live data in foreign-key-safe order."""
+
+        reference_time, latest_source_timestamp = self.connection.execute(
+            """
+            SELECT CURRENT_TIMESTAMP, max(sensing_datetime_utc)
+            FROM pedestrian_counts_minutely_live
+            """
+        ).fetchone()
+        reference_time = _aware_utc(reference_time, "retention reference time")
+        latest = (
+            None
+            if latest_source_timestamp is None
+            else _aware_utc(latest_source_timestamp, "latest live timestamp")
+        )
+        live_cutoff = (
+            None
+            if latest is None
+            else latest - timedelta(hours=self.config.live_retention_hours)
+        )
+        quarantine_cutoff = reference_time - timedelta(
+            days=self.config.quarantine_retention_days
+        )
+        run_cutoff = reference_time - timedelta(days=self.config.run_retention_days)
+
+        live_deleted = 0
+        if live_cutoff is not None:
+            live_deleted = max(
+                int(
+                    self.connection.execute(
+                        """
+                        DELETE FROM pedestrian_counts_minutely_live
+                        WHERE sensing_datetime_utc < %s
+                        """,
+                        (live_cutoff,),
+                    ).rowcount
+                ),
+                0,
+            )
+        quarantine_deleted = max(
+            int(
+                self.connection.execute(
+                    """
+                    DELETE FROM pedestrian_counts_minutely_quarantine
+                    WHERE detected_at < %s
+                    """,
+                    (quarantine_cutoff,),
+                ).rowcount
+            ),
+            0,
+        )
+        runs_deleted = max(
+            int(
+                self.connection.execute(
+                    """
+                    DELETE FROM live_ingestion_runs AS candidate
+                    WHERE candidate.status <> 'running'
+                      AND candidate.completed_at < %s
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM pedestrian_counts_minutely_live AS live
+                          WHERE live.live_run_id = candidate.run_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM pedestrian_counts_minutely_quarantine AS quarantine
+                          WHERE quarantine.live_run_id = candidate.run_id
+                      )
+                    """,
+                    (run_cutoff,),
+                ).rowcount
+            ),
+            0,
+        )
+        return LiveRetentionCleanupResult(
+            reference_time_utc=reference_time,
+            live_cutoff_utc=live_cutoff,
+            quarantine_cutoff_utc=quarantine_cutoff,
+            run_cutoff_utc=run_cutoff,
+            live_deleted=live_deleted,
+            quarantine_deleted=quarantine_deleted,
+            runs_deleted=runs_deleted,
+        )
 
     def _insert_direct_quarantine(
         self, run_id: str, records: Sequence[_QuarantineRecord]
@@ -927,7 +1094,7 @@ def run_live_ingestion(
 ) -> LiveIngestionResult:
     """Fetch, validate, quarantine, and load one bounded incremental live window."""
 
-    settings = config or LiveIngestionConfig()
+    settings = config or LiveIngestionConfig.from_environment()
     started = time.perf_counter()
     owned = connection is None
     if connection is None:
@@ -950,7 +1117,8 @@ def run_live_ingestion(
         start, end = determine_live_window(
             latest_source_timestamp, database.watermark(), settings
         )
-        run_id = database.start_run(start, end)
+        if not settings.dry_run:
+            run_id = database.start_run(start, end)
         try:
             payloads = (
                 tuple(dict(item) for item in source_records)
@@ -960,13 +1128,17 @@ def run_live_ingestion(
             batch = prepare_live_records(payloads, settings.contract)
             try:
                 with connection.transaction():
+                    if settings.dry_run:
+                        run_id = database.start_run(start, end)
+                    assert run_id is not None
                     loaded, unchanged, quarantined, status = database.load_batch(
                         run_id, batch
                     )
                     if settings.dry_run:
                         raise _DryRunRollback()
+                    retention_cleanup = database.cleanup_retention()
             except _DryRunRollback:
-                database.delete_run(run_id)
+                run_id = None
                 return LiveIngestionResult(
                     run_id=None,
                     status="dry_run",
@@ -1003,9 +1175,11 @@ def run_live_ingestion(
                 partition_count=client.partition_count,
                 elapsed_seconds=time.perf_counter() - started,
                 warnings=warnings,
+                retention_cleanup=retention_cleanup,
             )
         except Exception as error:
-            database.fail_run(run_id, error)
+            if run_id is not None and not settings.dry_run:
+                database.fail_run(run_id, error)
             if isinstance(error, LiveIngestionError):
                 raise
             safe = _safe_error(error, settings.error_message_max_length)
@@ -1021,6 +1195,7 @@ __all__ = [
     "LiveIngestionConfig",
     "LiveIngestionError",
     "LiveIngestionResult",
+    "LiveRetentionCleanupResult",
     "LiveSourceContract",
     "canonical_payload_fingerprint",
     "determine_live_window",
