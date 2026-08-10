@@ -1,47 +1,105 @@
+# ==============================
 # Dependencies
+# ==============================
 node_modules/
 vendor/
-.venv/
-venv/
-env/
-ENV/
 __pycache__/
 .python-version
 *.py[cod]
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
 
-# Build and test output
-dist/
-build/
-coverage/
+
+# ==============================
+# Next.js
+# ==============================
 .next/
 out/
 .pytest_cache/
 .ipynb_checkpoints/
+build/
 
-# Environment files and secrets
+
+# ==============================
+# Testing
+# ==============================
+coverage/
+
+
+# ==============================
+# Environment files / Secrets
+# ==============================
 .env
 .env.*
+.venv/
+venv/
+env/
+ENV/
 !.env.example
 
-# IDE and operating system
+
+# ==============================
+# Logs
+# ==============================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+
+# ==============================
+# TypeScript
+# ==============================
+*.tsbuildinfo
+next-env.d.ts
+
+
+# ==============================
+# Vercel
+# ==============================
+.vercel/
+
+
+# ==============================
+# IDE / Editor
+# ==============================
 .vscode/
 .idea/
+
+
+# ==============================
+# Operating System Files
+# ==============================
 .DS_Store
 Thumbs.db
 
-# Logs and temporary files
-*.log
-*.swp
+
+# ==============================
+# Local / Generated Development Files
+# ==============================
+Microsoft/
+.claude/
+
+
+# ==============================
+# Python / Flask Backend
+# ==============================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+
+# ==============================
+# Temporary Files
+# ==============================
 *.tmp
-
-# Local and generated data pipeline outputs
-data_pipeline/data/raw/*
-!data_pipeline/data/raw/.gitkeep
-data_pipeline/data/interim/*
-!data_pipeline/data/interim/.gitkeep
-data_pipeline/data/processed/*
-!data_pipeline/data/processed/.gitkeep
-
-# Sample data is intentionally allowed in version control
-!data_pipeline/data/sample/
-!data_pipeline/data/sample/**
+*.temp
+*.swp
+*.swo
