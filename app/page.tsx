@@ -1,6 +1,11 @@
 "use client";
-import { FormEvent, useState } from "react";
-import GoogleRouteMap from "./GoogleRouteMap";
+import { FormEvent, useEffect, useState } from "react";
+import GoogleRouteMap, {
+  type CalculatedRouteMetric,
+  type CalculatedRouteMetrics,
+  type CrowdDensityPoint,
+} from "./GoogleRouteMap";
+import GooglePlaceInput from "./GooglePlaceInput";
 import {
   AnimatePresence,
   motion,
@@ -49,37 +54,37 @@ const routes = [
   {
     id: "b",
     name: "Route B",
-    label: "Open-space detour",
+    label: "Walking alternative",
     eta: "20 min",
     distance: "1.6 km",
     risk: "medium",
     summary:
-      "Adds a small amount of walking time but stays closer to wider streets and quieter pause points.",
-    metrics: ["Crowd: low-mid", "Construction: low", "Open space: best"],
+      "A distinct Google walking alternative shown for comparison. It is not crowd-scored by the CityFlow backend.",
+    metrics: ["Crowd: not scored", "Route: alternative", "Source: Google"],
     scores: [
       [
-        "More open walking space",
-        "Prioritises streets with wider footpaths and better escape points.",
-        "Strong",
-        "low",
-      ],
-      [
-        "Slightly longer travel time",
-        "Adds around 2 minutes compared with the recommended route.",
-        "+2 min",
+        "Distinct walking path",
+        "Uses a Google walking alternative when one is available.",
+        "Alternative",
         "medium",
       ],
       [
-        "Lower reroute stress",
-        "Keeps a quiet break location within a short walk.",
-        "Good",
-        "low",
+        "Calculated travel estimate",
+        "Distance and time update after the route request completes.",
+        "Live",
+        "medium",
+      ],
+      [
+        "Crowd score unavailable",
+        "CityFlow does not currently return a third crowd-weighted route.",
+        "Not scored",
+        "warning",
       ],
     ],
     nav: [
-      "Follow Route B with more open space",
-      "Continue toward Russell St, then turn left.",
-      "Sensory note: this option avoids the busier tram-stop edge.",
+      "Follow Route B alternative",
+      "Follow the highlighted orange walking route.",
+      "Sensory note: this alternative is not crowd-scored by CityFlow.",
     ],
   },
   {
@@ -122,9 +127,39 @@ const routes = [
 const prefs = [
   "Avoid crowds",
   "Avoid construction",
-  "Prefer open spaces",
   "Simpler crossings",
 ];
+const quietBreakPlaces = [
+  {
+    id: "flagstaff",
+    name: "Flagstaff Gardens",
+    amenity: "Open space",
+    lat: -37.8105,
+    lng: 144.9544,
+  },
+  {
+    id: "library",
+    name: "State Library forecourt",
+    amenity: "Seating nearby",
+    lat: -37.8097,
+    lng: 144.9652,
+  },
+] as const;
+
+function distanceBetween(
+  first: { lat: number; lng: number },
+  second: { lat: number; lng: number },
+) {
+  const radians = (degrees: number) => (degrees * Math.PI) / 180;
+  const latitudeDelta = radians(second.lat - first.lat);
+  const longitudeDelta = radians(second.lng - first.lng);
+  const value =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(radians(first.lat)) *
+      Math.cos(radians(second.lat)) *
+      Math.sin(longitudeDelta / 2) ** 2;
+  return 6_371_000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
 function Mark() {
   return (
     <svg viewBox="0 0 32 32">
@@ -172,20 +207,156 @@ export default function Home() {
       damping: 18,
       mass: 1.1,
     });
-  const [routeId, setRouteId] = useState("a"),
+  const [routeId, setRouteId] =
+      useState<(typeof routes)[number]["id"]>("a"),
     [selectedPrefs, setPrefs] = useState<string[]>(prefs.slice(0, 2)),
-    [from, setFrom] = useState("RMIT University"),
-    [to, setTo] = useState("State Library Victoria"),
+    [from, setFrom] = useState("RMIT University, Melbourne"),
+    [to, setTo] = useState("State Library Victoria, Melbourne"),
     [journey, setJourney] = useState({
       origin: "RMIT University, Melbourne",
       destination: "State Library Victoria, Melbourne",
     }),
-    [busy, setBusy] = useState(false),
-    [notice, setNotice] = useState("");
-  const route = routes.find((r) => r.id === routeId) ?? routes[0];
-  const select = (id: string) => {
+    [notice, setNotice] = useState(""),
+    [crowdData, setCrowdData] = useState<CrowdDensityPoint[]>([]),
+    [crowdStatus, setCrowdStatus] = useState("Loading crowd conditions…"),
+    [dataQualityStatus, setDataQualityStatus] = useState(
+      "Checking sensor freshness…",
+    ),
+    [calculatedRoutes, setCalculatedRoutes] =
+      useState<CalculatedRouteMetrics | null>(null),
+    [crowdRefresh, setCrowdRefresh] = useState(0);
+  const metricForRoute = (id: string): CalculatedRouteMetric | undefined =>
+    id === "a"
+      ? calculatedRoutes?.lowCrowd
+      : id === "b"
+        ? calculatedRoutes?.alternative
+      : id === "c"
+        ? calculatedRoutes?.shortest
+        : undefined;
+  const baseRoute = routes.find((r) => r.id === routeId) ?? routes[0];
+  const selectedMetric = metricForRoute(baseRoute.id);
+  const route = selectedMetric
+    ? {
+        ...baseRoute,
+        eta: `≈${selectedMetric.estimatedMinutes} min`,
+        distance: `${(selectedMetric.distanceMeters / 1000).toFixed(1)} km`,
+      }
+    : {
+        ...baseRoute,
+        eta:
+          baseRoute.id === "a" && calculatedRoutes?.lowCrowdPending
+            ? "Calculating…"
+            : calculatedRoutes
+              ? "Unavailable"
+              : "Calculating…",
+        distance: "—",
+      };
+  const busy = crowdData.some((point) => point.level === "high");
+  const quietPlaceDetail = (place: (typeof quietBreakPlaces)[number]) => {
+    if (!crowdData.length) return `${place.amenity} · ${crowdStatus}`;
+    const nearest = crowdData.reduce((closest, sensor) =>
+      distanceBetween(place, sensor) < distanceBetween(place, closest)
+        ? sensor
+        : closest,
+    );
+    const sensorDistance = Math.round(distanceBetween(place, nearest));
+    const level =
+      nearest.level === "moderate"
+        ? "Moderate"
+        : `${nearest.level[0].toUpperCase()}${nearest.level.slice(1)}`;
+    const freshness =
+      nearest.dataStatus === "fresh"
+        ? "Fresh reading"
+        : nearest.dataStatus === "stale"
+          ? "Stale reading"
+          : "No live reading";
+    return `${place.amenity} · ${level} crowd · ${freshness} · nearest sensor ${sensorDistance} m away${nearest.updatedAt ? ` · observed ${nearest.updatedAt}` : ""}`;
+  };
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadCrowdConditions() {
+      setCrowdStatus("Loading crowd conditions…");
+      try {
+        const response = await fetch("/api/crowd-conditions", {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as {
+          generated_at?: string;
+          detail?: string;
+          conditions?: Array<{
+            sensor_id: number;
+            sensor_name: string;
+            latitude: number;
+            longitude: number;
+            source: "live" | "historical" | "none";
+            crowd_ratio: number | null;
+            crowd_level: "low" | "medium" | "high" | null;
+            observed_at: string | null;
+            live_status: "fresh" | "stale" | "no_data";
+          }>;
+        };
+        if (!response.ok)
+          throw new Error(payload.detail || "Crowd conditions are unavailable.");
+        const points = (payload.conditions ?? [])
+          .filter(
+            (item) =>
+              Number.isFinite(item.latitude) &&
+              Number.isFinite(item.longitude) &&
+              item.crowd_level !== null &&
+              item.crowd_ratio !== null,
+          )
+          .map((item) => ({
+            id: String(item.sensor_id),
+            location: item.sensor_name,
+            lat: item.latitude,
+            lng: item.longitude,
+            level: item.crowd_level === "medium" ? "moderate" : item.crowd_level!,
+            crowdRatio: item.crowd_ratio!,
+            source: item.source,
+            dataStatus: item.live_status,
+            updatedAt: item.observed_at
+              ? new Date(item.observed_at).toLocaleString("en-AU", {
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                })
+              : undefined,
+          })) satisfies CrowdDensityPoint[];
+        setCrowdData(points);
+        setCrowdStatus(
+          points.length
+            ? `${points.length} sensor${points.length === 1 ? "" : "s"} updated`
+            : "No crowd observations are currently available.",
+        );
+        const allConditions = payload.conditions ?? [];
+        const fresh = allConditions.filter(
+          (item) => item.live_status === "fresh",
+        ).length;
+        const stale = allConditions.filter(
+          (item) => item.live_status === "stale",
+        ).length;
+        const noData = allConditions.filter(
+          (item) => item.live_status === "no_data",
+        ).length;
+        setDataQualityStatus(
+          `${fresh} fresh · ${stale} stale · ${noData} no data`,
+        );
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setCrowdData([]);
+        setCrowdStatus(
+          error instanceof Error
+            ? error.message
+            : "Crowd conditions are unavailable.",
+        );
+        setDataQualityStatus("Sensor freshness is unavailable.");
+      }
+    }
+    void loadCrowdConditions();
+    return () => controller.abort();
+  }, [crowdRefresh]);
+  const select = (id: (typeof routes)[number]["id"]) => {
     setRouteId(id);
-    setBusy(false);
     setNotice("");
   };
   const submit = (e: FormEvent) => {
@@ -196,8 +367,12 @@ export default function Home() {
       setNotice("Enter both a starting point and destination.");
       return;
     }
+    if (origin === destination) {
+      setNotice("Choose two different places for your journey.");
+      return;
+    }
+    setCalculatedRoutes(null);
     setJourney({ origin, destination });
-    setBusy(false);
     setNotice(`Live route requested for ${origin} to ${destination}.`);
     document.querySelector("#options")?.scrollIntoView({ behavior: "smooth" });
   };
@@ -208,27 +383,9 @@ export default function Home() {
         whileInView: { opacity: 1, y: 0 },
         viewport: { once: true, amount: 0.12 },
         transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const },
-      };
+  };
   return (
     <>
-      <motion.header
-        className="app-header"
-        initial={reduceMotion ? false : { opacity: 0, y: -10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-      >
-        <a className="brand" href="#planner" aria-label="City Flow home">
-          <span className="brand-mark">
-            <Mark />
-          </span>
-        </a>
-        <nav>
-          <a href="#planner">Planner</a>
-          <a href="#details">Route details</a>
-          <a href="#navigation">Navigation</a>
-          <a href="#data">Live data</a>
-        </nav>
-      </motion.header>
       <main>
         <motion.section
           className="hero-shell"
@@ -249,6 +406,18 @@ export default function Home() {
             heroPointerY.set(0);
           }}
         >
+          <motion.nav
+            className="hero-nav"
+            aria-label="Main navigation"
+            initial={reduceMotion ? false : { opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+          >
+            <a href="#planner">Planner</a>
+            <a href="#data">Live data</a>
+            <a href="#details">Route details</a>
+            <a href="#navigation">Navigation</a>
+          </motion.nav>
           <motion.div
             className="hero-parallax"
             style={{ x: heroFloatX, y: heroFloatY }}
@@ -366,11 +535,19 @@ export default function Home() {
             <Heading over="Start a route check" title="Plan with two places" />
             <label>
               <span>From</span>
-              <input value={from} onChange={(e) => setFrom(e.target.value)} />
+              <GooglePlaceInput
+                value={from}
+                onChange={setFrom}
+                placeholder="Type a starting address or place"
+              />
             </label>
             <label>
               <span>To</span>
-              <input value={to} onChange={(e) => setTo(e.target.value)} />
+              <GooglePlaceInput
+                value={to}
+                onChange={setTo}
+                placeholder="Type a destination address or place"
+              />
             </label>
             <fieldset>
               <legend>Sensory preferences</legend>
@@ -410,44 +587,35 @@ export default function Home() {
             <Heading over="Live data status" title="Current conditions" />
             <div className="status-list">
               <Status
-                warning={busy || route.risk === "high"}
+                warning={crowdData.some((point) => point.level === "high")}
                 title="Pedestrian density"
                 text={
-                  busy
-                    ? "Rising foot traffic detected near Swanston St"
-                    : route.risk === "high"
-                      ? "High near Melbourne Central"
-                      : "Low around the recommended route"
+                  crowdData.some((point) => point.level === "high")
+                    ? `${crowdData.filter((point) => point.level === "high").length} high-crowd sensor area${crowdData.filter((point) => point.level === "high").length === 1 ? "" : "s"}`
+                    : crowdData.length
+                      ? "No high-crowd sensor areas reported"
+                      : crowdStatus
                 }
               />
               <Status
-                warning={busy || route.risk === "high"}
-                title="Construction risk"
-                text={
-                  busy
-                    ? "Short works reported near La Trobe St"
-                    : route.risk === "high"
-                      ? "Possible works near the north end"
-                      : "No major disruption detected"
-                }
+                warning={dataQualityStatus.startsWith("0 fresh")}
+                title="Sensor freshness"
+                text={dataQualityStatus}
               />
               <Status
                 calm
                 title="Data confidence"
-                text={
-                  notice ||
-                  (busy ? "Live data updated just now" : "Updated 2 min ago")
-                }
+                text={notice || crowdStatus}
               />
             </div>
             <button
               className="quiet-button"
               onClick={() => {
-                setBusy(true);
                 setNotice("");
+                setCrowdRefresh((value) => value + 1);
               }}
             >
-              Simulate busier live data
+              Refresh crowd conditions
             </button>
           </aside>
           <section className="map-panel panel">
@@ -465,14 +633,9 @@ export default function Home() {
             <GoogleRouteMap
               origin={journey.origin}
               destination={journey.destination}
-              onLocationPick={(kind, location, label) => {
-                setJourney((current) => ({ ...current, [kind]: location }));
-                if (kind === "origin") setFrom(label);
-                else setTo(label);
-                setNotice(
-                  `${kind === "origin" ? "Start" : "Destination"} set from the map.`,
-                );
-              }}
+              selectedRouteId={routeId}
+              crowdData={crowdData}
+              onRoutesCalculated={setCalculatedRoutes}
             />
           </section>
           <aside className="panel stack" id="options">
@@ -508,8 +671,25 @@ export default function Home() {
                     </h3>
                     <p>{r.label}</p>
                   </div>
-                  <strong className="route-meta">{r.eta}</strong>
+                  <strong className="route-meta">
+                    {metricForRoute(r.id)
+                      ? `≈${metricForRoute(r.id)!.estimatedMinutes} min`
+                      : r.id === "a" && calculatedRoutes?.lowCrowdPending
+                        ? "Calculating…"
+                      : calculatedRoutes
+                          ? "Unavailable"
+                          : "Calculating…"}
+                  </strong>
                   <div className="route-metrics">
+                    {metricForRoute(r.id) && (
+                      <span>
+                        Distance: {" "}
+                        {(
+                          metricForRoute(r.id)!.distanceMeters / 1000
+                        ).toFixed(1)}{" "}
+                        km
+                      </span>
+                    )}
                     {r.metrics.map((m) => {
                       const tone =
                         m.includes("high") || m.includes("limited")
@@ -594,14 +774,13 @@ export default function Home() {
           </article>
           <article className="panel quiet-space-card">
             <Heading over="Quiet break support" title="Need a quiet break?" />
-            <Place
-              name="Flagstaff Gardens"
-              detail="6 min away · Open space · Lower crowd level"
-            />
-            <Place
-              name="State Library forecourt"
-              detail="4 min away · Seating nearby · Moderate crowd level"
-            />
+            {quietBreakPlaces.map((place) => (
+              <Place
+                name={place.name}
+                detail={quietPlaceDetail(place)}
+                key={place.id}
+              />
+            ))}
           </article>
         </motion.section>
       </main>
