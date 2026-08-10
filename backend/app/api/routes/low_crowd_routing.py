@@ -28,21 +28,39 @@ app/core/crowd_sql.py): fresh/delayed live data is used as-is; stale
 or no_data falls back to the most recent historical row for that
 sensor.
 
-PERFORMANCE NOTE: previously, pgr_dijkstra's edges-SQL argument had to
-compute a crowd-weighted cost for the ENTIRE network (~70k edges x
-~100 sensors) via a live spatial join (ST_DWithin) on every call. That
-class of problem is now gone: app/core/crowd_sql.py queries the
-precomputed edge_sensor_map table (migration 008) instead, which is a
-plain indexed equality lookup. Requires the map to actually exist --
-after pulling the data-pipeline branch:
-    python database/migrate.py
-    python -m cityflow_pipeline.edge_sensor_map --radius-m 150
-The two-query split below (path first, then a scoped detail query) and
-the in-memory response cache were both built to work around the old
-spatial-join cost. They're kept -- neither hurts now that the
-underlying query is fast, and the cache still helps for genuinely
-repeated identical requests -- but they're no longer load-bearing for
-correctness or acceptable performance the way they were before.
+PERFORMANCE:
+
+  - The spatial cost (which sensors are near which edges) is gone --
+    app/core/crowd_sql.py queries the precomputed edge_sensor_map table
+    (migration 008) instead of a live ST_DWithin join. Requires the map
+    to exist:
+        python database/migrate.py
+        python -m cityflow_pipeline.edge_sensor_map --radius-m 150
+
+  - What's left is resolving each sensor's CURRENT effective crowd
+    ratio (the fresh/delayed/historical fallback in
+    EFFECTIVE_SENSOR_CROWD_CTE) -- this is real, non-trivial work
+    (joins against hourly_crowd_features and latest_sensor_crowd_levels)
+    that was being computed TWICE per request: once inside
+    pgr_dijkstra's edges query, once again in the path-detail query.
+    That's fixed here by resolving it ONCE into a session-scoped TEMP
+    TABLE, then having both queries read from that instead of
+    recomputing it. The temp table is created inside an explicit
+    transaction with ON COMMIT DROP, so it's cleaned up automatically
+    and never leaks into the next request that reuses this pooled
+    connection.
+
+  - The in-memory response cache (below) is a separate, additional
+    layer on top of both of the above -- still useful for genuinely
+    repeated identical requests, but no longer load-bearing for a
+    single request's performance the way it was before.
+
+  - A freshly created temp table has no query-planner statistics until
+    ANALYZEd -- Postgres defaults to guessing it has almost no rows,
+    which can push the planner toward a slow join strategy against the
+    ~70k-row routing_edges_pgr. An index plus an explicit ANALYZE run
+    right after creating the temp table (before either query touches
+    it) fixes this; CREATE TABLE AS does not analyse automatically.
 """
 
 import json
@@ -67,65 +85,82 @@ router = APIRouter(prefix="/api/routes/low-crowd", tags=["routing"])
 # near a sensor at 2x baseline crowd costs roughly 2x as much to walk".
 CROWD_PENALTY_WEIGHT = 1.0
 
-# How far (metres) a sensor's influence reaches to nearby edges.
+# How far (metres) a sensor's influence reaches to nearby edges. Must be
+# <= the radius edge_sensor_map was built with, or rows beyond that
+# build-time cutoff simply won't exist to filter down to.
 PROXIMITY_RADIUS_M = 150.0
 
 # How long a cached route response is considered still valid. Chosen to
 # roughly match how often crowd data itself changes (live_runner's own
-# refresh cadence), not an arbitrary number -- no point caching longer
-# than the underlying data stays the same, and no point caching shorter
-# than that either.
+# refresh cadence), not an arbitrary number.
 CACHE_TTL_SECONDS = 600  # 10 minutes
 
-# sensor_id... no: (start_node, end_node) -> (response, cached_at_epoch_seconds)
+# (start_node, end_node) -> (response, cached_at_epoch_seconds)
 _route_cache: Dict[Tuple[int, int], Tuple[LowCrowdRouteResponse, float]] = {}
 
 _EDGE_NEARBY_RATIO_CTE = build_edge_nearby_ratio_cte(PROXIMITY_RADIUS_M)
 
+# Resolves each sensor's current effective crowd ratio and each edge's
+# nearby-sensor max ratio ONCE, into a temp table scoped to this
+# connection/transaction. ON COMMIT DROP means it's cleaned up
+# automatically when the transaction ends, regardless of success or
+# failure, before the connection returns to the pool.
+_MATERIALIZE_EDGE_RATIO_SQL = f"""
+    CREATE TEMP TABLE tmp_edge_nearby_ratio ON COMMIT DROP AS
+    WITH {_EDGE_NEARBY_RATIO_CTE}
+    SELECT id, max_ratio FROM edge_nearby_ratio;
+"""
+
+# A freshly created temp table has NO statistics until analysed --
+# Postgres defaults to a near-zero row-count guess, which can make the
+# planner choose a bad join strategy (e.g. nested loop instead of hash
+# join) for the ~18k-row join against routing_edges_pgr's ~70k rows.
+# Both the index and ANALYZE are needed; CREATE TABLE AS does not run
+# ANALYZE automatically.
+_INDEX_EDGE_RATIO_SQL = "CREATE UNIQUE INDEX ON tmp_edge_nearby_ratio (id);"
+_ANALYZE_EDGE_RATIO_SQL = "ANALYZE tmp_edge_nearby_ratio;"
+
 # Passed as a bind parameter (not string-interpolated) into pgr_dijkstra's
 # edges-SQL argument, so the embedded quotes never need manual escaping.
-# This still scans the full network -- required by pgr_dijkstra's design.
+# Reads from the temp table -- no recomputation of crowd data here.
 _LOW_CROWD_EDGES_SQL = f"""
-    WITH {_EDGE_NEARBY_RATIO_CTE}
     SELECT
         e.id,
         e.source,
         e.target,
         e.cost * (
             1 + {CROWD_PENALTY_WEIGHT}
-              * GREATEST(COALESCE(enr.max_ratio, 1.0) - 1, 0)
+              * GREATEST(COALESCE(t.max_ratio, 1.0) - 1, 0)
         ) AS cost,
         e.reverse_cost * (
             1 + {CROWD_PENALTY_WEIGHT}
-              * GREATEST(COALESCE(enr.max_ratio, 1.0) - 1, 0)
+              * GREATEST(COALESCE(t.max_ratio, 1.0) - 1, 0)
         ) AS reverse_cost
     FROM routing_edges_pgr e
-    LEFT JOIN edge_nearby_ratio enr ON enr.id = e.id
+    LEFT JOIN tmp_edge_nearby_ratio t ON t.id = e.id
 """
 
 # Just runs pgr_dijkstra and returns the raw path -- no crowd/geometry
-# join here, kept minimal so this first query is as fast as the
-# structural full-network cost inside pgr_dijkstra allows.
+# join here, kept minimal.
 _DIJKSTRA_ONLY_SQL = """
     SELECT seq, node, edge, cost AS weighted_cost, agg_cost AS weighted_agg_cost
     FROM pgr_dijkstra($1, $2::bigint, $3::bigint, directed => false)
     ORDER BY seq;
 """
 
-# Second pass: crowd status, base distance and geometry, but scoped to
-# only the edge IDs actually in the path (passed as $1, typically tens
-# to a few hundred rows) -- not a rescan of all ~70k edges.
-_PATH_DETAIL_SQL = f"""
-    WITH {_EDGE_NEARBY_RATIO_CTE}
+# Second pass: crowd status, base distance and geometry, scoped to only
+# the edge IDs actually in the path. Also reads from the same temp
+# table -- crowd data resolved once, used twice.
+_PATH_DETAIL_SQL = """
     SELECT
         e.id,
         e.source,
         e.target,
         e.cost AS base_distance_m,
-        enr.max_ratio AS crowd_ratio,
+        t.max_ratio AS crowd_ratio,
         ST_AsGeoJSON(e.geometry) AS geometry_geojson
     FROM routing_edges_pgr e
-    LEFT JOIN edge_nearby_ratio enr ON enr.id = e.id
+    LEFT JOIN tmp_edge_nearby_ratio t ON t.id = e.id
     WHERE e.id = ANY($1::bigint[]);
 """
 
@@ -142,9 +177,6 @@ def _get_cached(key: Tuple[int, int]):
 
 
 def _store_cache(key: Tuple[int, int], response: LowCrowdRouteResponse) -> None:
-    # Opportunistic cleanup of expired entries so this dict doesn't grow
-    # unbounded over a long-running server. Not a full LRU -- fine at
-    # this scale (a handful of distinct routes tested at a time).
     now = time.monotonic()
     expired = [k for k, (_, cached_at) in _route_cache.items() if now - cached_at > CACHE_TTL_SECONDS]
     for k in expired:
@@ -163,21 +195,26 @@ async def get_low_crowd_route(request: RouteRequest) -> LowCrowdRouteResponse:
     pool = get_pool()
 
     async with pool.acquire() as conn:
-        path_rows = await conn.fetch(
-            _DIJKSTRA_ONLY_SQL,
-            _LOW_CROWD_EDGES_SQL,
-            request.start_node,
-            request.end_node,
-        )
+        async with conn.transaction():
+            await conn.execute(_MATERIALIZE_EDGE_RATIO_SQL)
+            await conn.execute(_INDEX_EDGE_RATIO_SQL)
+            await conn.execute(_ANALYZE_EDGE_RATIO_SQL)
 
-        if not path_rows:
-            raise HTTPException(
-                status_code=404,
-                detail="No route found between the given nodes.",
+            path_rows = await conn.fetch(
+                _DIJKSTRA_ONLY_SQL,
+                _LOW_CROWD_EDGES_SQL,
+                request.start_node,
+                request.end_node,
             )
 
-        edge_ids = [r["edge"] for r in path_rows if r["edge"] != -1]
-        detail_rows = await conn.fetch(_PATH_DETAIL_SQL, edge_ids) if edge_ids else []
+            if not path_rows:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No route found between the given nodes.",
+                )
+
+            edge_ids = [r["edge"] for r in path_rows if r["edge"] != -1]
+            detail_rows = await conn.fetch(_PATH_DETAIL_SQL, edge_ids) if edge_ids else []
 
     # edge_id -> (source, target, base_distance_m, crowd_ratio, geometry)
     detail_by_edge = {r["id"]: r for r in detail_rows}
@@ -201,8 +238,6 @@ async def get_low_crowd_route(request: RouteRequest) -> LowCrowdRouteResponse:
 
             if detail["geometry_geojson"]:
                 raw_geometry = json.loads(detail["geometry_geojson"])
-                # Orient to the direction actually travelled, same as
-                # the original single-query version did in SQL.
                 if detail["source"] == r["node"]:
                     geometry = raw_geometry
                 elif detail["target"] == r["node"]:
