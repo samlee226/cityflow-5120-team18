@@ -62,7 +62,7 @@ def build_edge_nearby_ratio_cte(radius_m: float) -> str:
     """
     Builds on EFFECTIVE_SENSOR_CROWD_CTE to add edge_nearby_ratio: one row
     per edge that has at least one sensor with a known (non-NULL) ratio
-    within radius_m metres, using PostGIS ST_DWithin on geography.
+    within radius_m metres.
 
     Aggregation rule when multiple sensors are in range: MAX(ratio) is
     used -- the most cautious choice, since a road bordered by both a
@@ -77,6 +77,25 @@ def build_edge_nearby_ratio_cte(radius_m: float) -> str:
     from an edge that has a row but effective_crowd_ratio is exactly at
     or below baseline, which IS a known, confirmed-calm reading.
 
+    PERFORMANCE: uses the precomputed edge_sensor_map table (migration
+    008), built once via
+        python -m cityflow_pipeline.edge_sensor_map --radius-m <r>
+    rather than computing ST_DWithin spatial distance on every request.
+    The geographic relationship between edges and sensors barely
+    changes; only which sensors currently report elevated crowd does.
+    Previous attempts to speed up a live per-request spatial join (base-
+    table joins, MATERIALIZED CTEs, two-phase geometry/geography
+    filters) were tested and reverted -- they either didn't help end to
+    end or made pgr_dijkstra's full-network query worse. This
+    precomputed table sidesteps that entire class of problem: the join
+    below is a plain indexed equality lookup, not a spatial calculation.
+
+    radius_m here is a query-time filter (`distance_m <= radius_m`), not
+    a spatial calculation -- it can be tightened below the radius the
+    map was BUILT with (e.g. built at 150m, queried at 100m) without a
+    rebuild, but widening it beyond the build radius will just return no
+    additional rows, since the map has nothing to give past that cutoff.
+
     radius_m is a Python-side constant, never user input, so it's safe
     to interpolate directly into the SQL text here.
     """
@@ -84,17 +103,12 @@ def build_edge_nearby_ratio_cte(radius_m: float) -> str:
 {EFFECTIVE_SENSOR_CROWD_CTE},
 edge_nearby_ratio AS (
     SELECT
-        e.id,
+        m.edge_id AS id,
         MAX(esc.effective_crowd_ratio) AS max_ratio
-    FROM routing_edges_pgr e
-    JOIN sensors s
-        ON ST_DWithin(
-            s.geometry::geography,
-            e.geometry::geography,
-            {radius_m}
-        )
-    JOIN effective_sensor_crowd esc ON esc.sensor_id = s.sensor_id
+    FROM edge_sensor_map m
+    JOIN effective_sensor_crowd esc ON esc.sensor_id = m.sensor_id
     WHERE esc.effective_crowd_ratio IS NOT NULL
-    GROUP BY e.id
+      AND m.distance_m <= {radius_m}
+    GROUP BY m.edge_id
 )
 """.strip()
