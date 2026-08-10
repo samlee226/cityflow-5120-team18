@@ -68,6 +68,58 @@ run, perform the real load, and check table/view counts before allowing an API
 to use it. The loader does not create databases, apply migrations, delete stale
 snapshot rows, calculate spatial distances, or ingest the minutely live feed.
 
+## Routing edge-to-sensor proximity map
+
+Low-crowd routing uses a fixed `edge_sensor_map` instead of recalculating the
+150-metre relationship between every routing edge and sensor for each API
+request. PostGIS performs the one-time set-based calculation in the database;
+Python never loads the edge/sensor Cartesian product. Each row contains the
+database `edge_id`, `sensor_id`, and minimum `distance_m` from the sensor point
+to the complete edge LineString.
+
+Apply migrations and rebuild locally from the repository root:
+
+```bash
+python database/migrate.py
+python -m cityflow_pipeline.edge_sensor_map --radius-m 150
+python -m cityflow_pipeline.edge_sensor_map --radius-m 150 --verify-only
+```
+
+The rebuild is transactional, deterministic, and safe to rerun. It prepares a
+replacement in a temporary table, replaces the derived map in one transaction,
+verifies it, and runs `ANALYZE edge_sensor_map`. The verification command is
+read-only and reports row, edge and sensor counts, coverage, distance range,
+duplicates, orphan references, radius violations, and a deterministic sample.
+Distances use PostGIS `geography`, so the radius and stored values are metres,
+not WGS84 degrees. Radius verification allows only `0.01` metre of documented
+floating-point tolerance.
+
+This mapping depends only on routing-edge geometry, canonical sensor geometry,
+and the configured radius. Rebuild it after any of those inputs changes. It is
+deliberately not part of the 15-minute Live Pipeline and does not depend on
+whether a sensor currently has live readings.
+
+After the code is deployed, Sam can run the equivalent EC2 commands:
+
+```bash
+cd /home/ubuntu/cityflow
+set -a
+source infra/compose/.env
+set +a
+source .venv/bin/activate
+python database/migrate.py
+python -m cityflow_pipeline.edge_sensor_map --radius-m 150
+python -m cityflow_pipeline.edge_sensor_map --radius-m 150 --verify-only
+```
+
+The EC2 migration and rebuild modify the shared database. Run them only after
+the matching code has been deployed and the team has approved the maintenance
+operation; this project task does not execute either command on EC2.
+
+Backend handoff: load `edge_id`, `sensor_id`, and `distance_m` from
+`edge_sensor_map`, then join those fixed pairs with the latest crowd ratios.
+The Backend must not repeat the 150-metre spatial calculation per request.
+
 ## Historical V1 end-to-end runner
 
 The runner connects the completed Week 3 layers without writing intermediate
