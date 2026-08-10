@@ -70,20 +70,43 @@ Once the instance has finished its first boot:
 ./scripts/connect.sh
 ```
 
-Then, on the instance:
+Then, on the instance. The repository is private, so the clone uses the
+read-only deploy key held at `~/.ssh/cityflow_deploy`:
 
 ```bash
-git clone <repository-url> ~/cityflow
+git clone -b <branch> git@github.com:<owner>/<repository>.git ~/cityflow
+```
+
+Create the environment file. `chmod` runs before the password is written, so
+the secret is never held in a world-readable file, and the `g` flag matters
+because the placeholder appears in both `POSTGRES_PASSWORD` and
+`DATABASE_URL` — they must match:
+
+```bash
 cd ~/cityflow/infra
 cp .env.example compose/.env
+chmod 600 compose/.env
 sed -i "s/CHANGE_ME/$(openssl rand -hex 24)/g" compose/.env
+```
+
+Build the image and start the database:
+
+```bash
 cd compose && docker compose up -d --build
 ```
 
-Apply the schema from the repository root, with the pipeline virtual
-environment active:
+Confirm it is healthy and both extensions are present before going further:
 
 ```bash
+docker compose ps
+docker compose exec -T db psql -U cityflow_app -d cityflow -c '\dx'
+```
+
+Apply the schema from the repository root, with the pipeline virtual
+environment active and the environment file loaded:
+
+```bash
+set -a; source infra/compose/.env; set +a
 python database/migrate.py
 ```
 
