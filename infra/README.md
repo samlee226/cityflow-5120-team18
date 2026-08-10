@@ -105,6 +105,19 @@ journalctl -u cityflow-live.service -n 50
 The timer is `Persistent`, so a run missed while the instance was stopped is
 executed on the next start rather than skipped.
 
+The service loads `infra/compose/.env` through its systemd `EnvironmentFile`.
+The checked-in `infra/.env.example` supplies these retention defaults when it
+is copied during setup:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CITYFLOW_LIVE_RETENTION_HOURS` | `24` | Retains minute-level live rows for this many hours, with the cutoff anchored to the latest source timestamp stored in the database. |
+| `CITYFLOW_LIVE_QUARANTINE_RETENTION_DAYS` | `7` | Retains quarantined rows for this many days, based on `detected_at`. |
+| `CITYFLOW_LIVE_RUN_RETENTION_DAYS` | `30` | Retains completed ingestion audit runs for this many days; referenced runs are kept until their live and quarantine records are removed. |
+
+Cleanup runs only after a successful, non-dry-run live ingestion. A dry run
+does not write or delete database records.
+
 ## Daily commands
 
 | Command | Effect |
