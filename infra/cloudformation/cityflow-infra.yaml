@@ -1,0 +1,222 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CityFlow deployment infrastructure. Provisions a single EC2 instance that
+  runs PostgreSQL/PostGIS/pgRouting and the application services in Docker,
+  plus an S3 bucket holding the raw open-data CSVs the pipeline reads from.
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 key pair used for SSH access to the instance.
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+    Description: >
+      t3.small or larger is required while the historical pipeline runs;
+      t3.micro is sufficient for steady-state serving afterwards.
+
+  VolumeSizeGb:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 100
+    Description: Root volume size. Holds the database, so it must exceed the loaded dataset.
+
+  SshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    Description: >
+      CIDR range permitted to reach port 22. Password authentication is
+      disabled on the instance, so access still requires a registered key.
+
+  DataUploaderArn:
+    Type: String
+    Default: ""
+    Description: >
+      Optional IAM principal ARN granted write access to the raw data prefix.
+      Leave empty to skip; it can be added later with a stack update.
+
+Conditions:
+  HasDataUploader: !Not [!Equals [!Ref DataUploaderArn, ""]]
+
+Resources:
+  RawDataBucket:
+    Type: AWS::S3::Bucket
+    # Retained on stack deletion so the source data survives a rebuild of the
+    # instance. Delete it manually if the project is being torn down for good.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub cityflow-raw-data-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  RawDataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: HasDataUploader
+    Properties:
+      Bucket: !Ref RawDataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowPipelineOwnerUpload
+            Effect: Allow
+            Principal:
+              AWS: !Ref DataUploaderArn
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub ${RawDataBucket.Arn}/cityflow/raw/*
+          - Sid: AllowPipelineOwnerList
+            Effect: Allow
+            Principal:
+              AWS: !Ref DataUploaderArn
+            Action: s3:ListBucket
+            Resource: !GetAtt RawDataBucket.Arn
+
+  # The instance reads S3 through this role, so no access keys are stored
+  # on the server or in the repository.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RawDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt RawDataBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub ${RawDataBucket.Arn}/*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH access to the CityFlow application host.
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshCidr
+          Description: SSH
+      Tags:
+        - Key: Name
+          Value: cityflow-host
+
+  AppHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: >-
+        {{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}
+      SecurityGroups:
+        - !Ref InstanceSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref VolumeSizeGb
+            DeleteOnTermination: true
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: cityflow-host
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git jq unzip \
+            python3 python3-pip python3-venv \
+            postgresql-client
+
+          # Docker Engine from the official repository, so the Compose plugin
+          # matches the version the team uses locally.
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+            > /etc/apt/sources.list.d/docker.list
+          apt-get update
+          apt-get install -y \
+            docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin
+          usermod -aG docker ubuntu
+
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" \
+            -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          /tmp/aws/install
+          rm -rf /tmp/aws /tmp/awscliv2.zip
+
+          install -d -o ubuntu -g ubuntu /home/ubuntu/cityflow
+          echo "CITYFLOW_RAW_BUCKET=${RawDataBucket}" > /etc/profile.d/cityflow.sh
+
+  AppHostEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref AppHost
+      Tags:
+        - Key: Name
+          Value: cityflow-host
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID, used by the start and stop scripts.
+    Value: !Ref AppHost
+
+  PublicIp:
+    Description: Static address of the application host.
+    Value: !Ref AppHostEip
+
+  SshCommand:
+    Description: Connection command for a key registered on the instance.
+    Value: !Sub ssh -i ~/.ssh/${KeyPairName}.pem ubuntu@${AppHostEip}
+
+  DatabaseTunnelCommand:
+    Description: Forwards the database to localhost:5432 without exposing it publicly.
+    Value: !Sub ssh -i ~/.ssh/${KeyPairName}.pem -L 5432:localhost:5432 ubuntu@${AppHostEip}
+
+  RawDataBucketName:
+    Description: Bucket holding the raw open-data CSVs.
+    Value: !Ref RawDataBucket
+
+  RawDataPrefix:
+    Description: Upload location for the source datasets.
+    Value: !Sub s3://${RawDataBucket}/cityflow/raw/

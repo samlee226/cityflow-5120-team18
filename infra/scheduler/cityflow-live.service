@@ -1,0 +1,17 @@
+[Unit]
+Description=CityFlow live pedestrian data ingestion
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/cityflow
+EnvironmentFile=/home/ubuntu/cityflow/infra/compose/.env
+ExecStart=/home/ubuntu/cityflow/.venv/bin/python -m cityflow_pipeline.live_runner
+
+# A run that outlives its own interval indicates a stall rather than slow work.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
