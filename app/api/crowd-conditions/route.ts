@@ -1,33 +1,23 @@
 import { NextResponse } from "next/server";
 
+import { proxyToBackend } from "@/app/lib/backend";
+
 export const dynamic = "force-dynamic";
 
-const DEFAULT_CITYFLOW_API_URL =
-  "https://finer-conform-radiance.ngrok-free.dev";
+const ALLOWED_LEVELS = ["low", "medium", "high"];
 
 export async function GET(request: Request) {
-  const baseUrl = (
-    process.env.CITYFLOW_API_BASE_URL ?? DEFAULT_CITYFLOW_API_URL
-  ).replace(/\/$/, "");
   const requestedLevel = new URL(request.url).searchParams.get("level");
-  const level = ["low", "medium", "high"].includes(requestedLevel ?? "")
+  const level = ALLOWED_LEVELS.includes(requestedLevel ?? "")
     ? `?level=${encodeURIComponent(requestedLevel!)}`
     : "";
 
   try {
-    const response = await fetch(
-      `${baseUrl}/api/live-crowd-conditions${level}`,
-      {
-        cache: "no-store",
-        signal: AbortSignal.timeout(12_000),
-        headers: {
-          Accept: "application/json",
-          "ngrok-skip-browser-warning": "true",
-        },
-      },
+    const { body, status } = await proxyToBackend(
+      `/api/live-crowd-conditions${level}`,
+      { timeoutMs: 12_000 },
     );
-    const body = await response.json();
-    return NextResponse.json(body, { status: response.status });
+    return NextResponse.json(body, { status });
   } catch {
     return NextResponse.json(
       { detail: "Unable to reach the CityFlow API." },

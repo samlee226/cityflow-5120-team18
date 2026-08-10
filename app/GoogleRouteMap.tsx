@@ -92,7 +92,9 @@ declare global {
 }
 
 const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+// Backend requests go to same-origin route handlers under /api, which forward
+// them server-side. Keeping the browser on its own origin avoids mixed-content
+// blocking and removes the need for cross-origin headers.
 
 function parseCoordinate(value: string): Coordinate | null {
   const parts = value.split(",").map((part) => part.trim());
@@ -368,7 +370,7 @@ export default function GoogleRouteMap({
         let startCoordinate = parseCoordinate(origin);
         let endCoordinate = parseCoordinate(destination);
 
-        if (apiBaseUrl && (!startCoordinate || !endCoordinate)) {
+        if (!startCoordinate || !endCoordinate) {
           setStatus("Locating your start and destination…");
           [startCoordinate, endCoordinate] = await Promise.all([
             resolveCoordinate(origin, googleMaps),
@@ -381,25 +383,18 @@ export default function GoogleRouteMap({
         }
 
         if (startCoordinate && endCoordinate) {
-          if (!apiBaseUrl)
-            throw new Error(
-              "Add NEXT_PUBLIC_API_URL to connect low-crowd routing.",
-            );
-
           setStatus("Finding nearest walking network nodes…");
           const nearestNodeUrl = (point: Coordinate) => {
-            const url = new URL(`${apiBaseUrl}/api/network/nearest-node`);
-            url.searchParams.set("lat", String(point.lat));
-            url.searchParams.set("lon", String(point.lng));
-            return url;
+            const params = new URLSearchParams({
+              lat: String(point.lat),
+              lon: String(point.lng),
+            });
+            return `/api/network/nearest-node?${params.toString()}`;
           };
           const nearestRequest = (point: Coordinate) =>
             fetch(nearestNodeUrl(point), {
               signal: AbortSignal.timeout(12_000),
-              headers: {
-                Accept: "application/json",
-                "ngrok-skip-browser-warning": "true",
-              },
+              headers: { Accept: "application/json" },
             });
           const [startResponse, endResponse] = await Promise.all([
             nearestRequest(startCoordinate),
@@ -420,13 +415,12 @@ export default function GoogleRouteMap({
 
           setStatus("Calculating shortest and low-crowd routes…");
           const requestBackendRoute = async (endpoint: string) => {
-            const response = await fetch(`${apiBaseUrl}${endpoint}`, {
+            const response = await fetch(endpoint, {
               method: "POST",
               signal: AbortSignal.timeout(75_000),
               headers: {
                 Accept: "application/json",
                 "Content-Type": "application/json",
-                "ngrok-skip-browser-warning": "true",
               },
               body: JSON.stringify({
                 start_node: startNode.node_id,
