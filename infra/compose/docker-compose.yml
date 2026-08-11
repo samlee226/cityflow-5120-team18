@@ -26,6 +26,26 @@ services:
       - no-new-privileges:true
     shm_size: 256mb
 
+  api:
+    build:
+      context: ../../backend
+    restart: unless-stopped
+    environment:
+      # db is the compose service name, resolved over the private network
+      # Docker creates for this project. localhost does not reach it here --
+      # inside this container, localhost means this container.
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Published on all interfaces, not just loopback: Vercel's servers reach
+    # this over the public internet. The AWS security group is the actual
+    # access control; see infra/cloudformation/cityflow-infra.yaml.
+    ports:
+      - "8000:8000"
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   # Named volume, not a bind mount: it survives `docker compose down` and
   # container rebuilds. `down -v` destroys it along with the loaded data.

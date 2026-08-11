@@ -122,13 +122,22 @@ Resources:
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: SSH access to the CityFlow application host.
+      GroupDescription: SSH and API access to the CityFlow application host.
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
           CidrIp: !Ref SshCidr
           Description: SSH
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+          Description: >-
+            CityFlow API called server-side by Vercel. Open to any address
+            since Vercel has no fixed egress IPs. Read-only public data with
+            no authentication. PostgreSQL stays on loopback and is not
+            reachable through this rule.
       Tags:
         - Key: Name
           Value: cityflow-host
