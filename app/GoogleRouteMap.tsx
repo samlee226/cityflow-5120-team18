@@ -25,17 +25,6 @@ type RouteResult = {
   durationMillis?: number;
   legs?: { steps?: { instructions?: string; distanceMeters?: number }[] }[];
 };
-type PositionMarker = {
-  map: MapInstance | null;
-  position: { lat: number; lng: number };
-};
-type MarkerLibrary = {
-  AdvancedMarkerElement: new (options: {
-    map: MapInstance;
-    position: { lat: number; lng: number };
-    title: string;
-  }) => PositionMarker;
-};
 type MapsLibrary = {
   Map: new (
     element: HTMLElement,
@@ -92,9 +81,6 @@ declare global {
 }
 
 const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-// Backend requests go to same-origin route handlers under /api, which forward
-// them server-side. Keeping the browser on its own origin avoids mixed-content
-// blocking and removes the need for cross-origin headers.
 
 function parseCoordinate(value: string): Coordinate | null {
   const parts = value.split(",").map((part) => part.trim());
@@ -239,6 +225,15 @@ async function readBackendResponse<T>(response: Response): Promise<T> {
   return body as T;
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]);
+}
+
 async function resolveCoordinate(
   value: string,
   googleMaps: GoogleMaps,
@@ -269,9 +264,15 @@ export type CalculatedRouteMetric = {
   distanceMeters: number;
   estimatedMinutes: number;
 };
+export type RouteCrowdData = {
+  score?: number;
+  coverageRatio?: number;
+  status?: string;
+};
 export type CalculatedRouteMetrics = {
   lowCrowd?: CalculatedRouteMetric;
   lowCrowdPending?: boolean;
+  lowCrowdData?: RouteCrowdData;
   alternative?: CalculatedRouteMetric;
   shortest?: CalculatedRouteMetric;
 };
@@ -304,14 +305,18 @@ export function loadGoogleMaps() {
 export default function GoogleRouteMap({
   origin,
   destination,
+  requestId = 0,
   selectedRouteId = "a",
   onRoutesCalculated,
+  onRoutingStatus,
   crowdData = EMPTY_CROWD_DATA,
 }: {
   origin: string;
   destination: string;
+  requestId?: number;
   selectedRouteId?: "a" | "b" | "c";
   onRoutesCalculated?: (metrics: CalculatedRouteMetrics) => void;
+  onRoutingStatus?: (status: string) => void;
   crowdData?: CrowdDensityPoint[];
 }) {
   const reduceMotion = useReducedMotion();
@@ -319,14 +324,12 @@ export default function GoogleRouteMap({
     map = useRef<MapInstance | null>(null),
     lines = useRef<RouteLine[]>([]),
     routeMetricsHandler = useRef(onRoutesCalculated),
-    watchId = useRef<number | null>(null),
-    positionMarker = useRef<PositionMarker | null>(null),
+    routingStatusHandler = useRef(onRoutingStatus),
     layerCircles = useRef<CircleInstance[]>([]),
     layerListeners = useRef<MapListener[]>([]),
     sensoryRouteRef = useRef(true),
     selectedRouteRef = useRef(selectedRouteId);
-  const [navigating, setNavigating] = useState(false),
-    [instruction, setInstruction] = useState(
+  const [instruction, setInstruction] = useState(
       "Route ready — start navigation when you are at the starting point.",
     );
   const [status, setStatus] = useState(
@@ -342,6 +345,12 @@ export default function GoogleRouteMap({
   useEffect(() => {
     routeMetricsHandler.current = onRoutesCalculated;
   }, [onRoutesCalculated]);
+  useEffect(() => {
+    routingStatusHandler.current = onRoutingStatus;
+  }, [onRoutingStatus]);
+  useEffect(() => {
+    routingStatusHandler.current?.(status);
+  }, [status]);
   useEffect(() => {
     if (!key || !container.current) return;
     let cancelled = false;
@@ -383,75 +392,30 @@ export default function GoogleRouteMap({
         }
 
         if (startCoordinate && endCoordinate) {
-          setStatus("Finding nearest walking network nodes…");
-          const nearestNodeUrl = (point: Coordinate) => {
-            const params = new URLSearchParams({
-              lat: String(point.lat),
-              lon: String(point.lng),
-            });
-            return `/api/network/nearest-node?${params.toString()}`;
-          };
-          const nearestRequest = (point: Coordinate) =>
-            fetch(nearestNodeUrl(point), {
-              signal: AbortSignal.timeout(12_000),
-              headers: { Accept: "application/json" },
-            });
-          const [startResponse, endResponse] = await Promise.all([
-            nearestRequest(startCoordinate),
-            nearestRequest(endCoordinate),
-          ]);
-          const [startNode, endNode] = await Promise.all([
-            readBackendResponse<NearestNodeResponse>(startResponse),
-            readBackendResponse<NearestNodeResponse>(endResponse),
-          ]);
-          if (!startNode.within_threshold)
-            throw new Error(
-              `The start is ${Math.round(startNode.distance_m)} m from the walking network, outside the ${startNode.threshold_m} m limit.`,
-            );
-          if (!endNode.within_threshold)
-            throw new Error(
-              `The destination is ${Math.round(endNode.distance_m)} m from the walking network, outside the ${endNode.threshold_m} m limit.`,
-            );
-
-          setStatus("Calculating shortest and low-crowd routes…");
-          const requestBackendRoute = async (endpoint: string) => {
-            const response = await fetch(endpoint, {
-              method: "POST",
-              signal: AbortSignal.timeout(75_000),
-              headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                start_node: startNode.node_id,
-                end_node: endNode.node_id,
-              }),
-            });
-            return readBackendResponse<LowCrowdRouteResponse>(response);
-          };
-          const backendResults = Promise.allSettled([
-            requestBackendRoute("/api/routes/low-crowd"),
-            requestBackendRoute("/api/routes"),
-          ]);
+          // Resolve standard Google walking choices first. They must remain
+          // available even when the CityFlow backend is slow or offline.
           let googleRoutes: RouteResult[] = [];
           try {
             const { Route } = (await googleMaps.importLibrary(
               "routes",
             )) as RoutesLibrary;
-            const alternatives = await Route.computeRoutes({
-              origin: startCoordinate,
-              destination: endCoordinate,
-              travelMode: "WALKING",
-              computeAlternativeRoutes: true,
-              fields: ["path", "distanceMeters", "durationMillis"],
-            });
+            const alternatives = await withTimeout(
+              Route.computeRoutes({
+                origin: startCoordinate,
+                destination: endCoordinate,
+                travelMode: "WALKING",
+                computeAlternativeRoutes: true,
+                fields: ["path", "distanceMeters", "durationMillis"],
+              }),
+              15_000,
+              "Google walking routes timed out.",
+            );
             googleRoutes =
               alternatives.routes?.filter((route) => route.path?.length) ?? [];
           } catch {
             googleRoutes = [];
           }
           const googleShortest = googleRoutes[0];
-          // Do not present Google's primary route twice when no alternative exists.
           const alternativeRoute = googleRoutes[1];
           const googleMetric = (
             route: RouteResult | undefined,
@@ -517,6 +481,61 @@ export default function GoogleRouteMap({
             map.current.fitBounds(preliminaryBounds);
             setStatus("Standard routes ready; calculating low-crowd route…");
           }
+
+          setStatus("Finding nearest walking network nodes…");
+          const nearestNodeUrl = (point: Coordinate) => {
+            const url = new URL(
+              "/api/network/nearest-node",
+              window.location.origin,
+            );
+            url.searchParams.set("lat", String(point.lat));
+            url.searchParams.set("lon", String(point.lng));
+            return url;
+          };
+          const nearestRequest = (point: Coordinate) =>
+            fetch(nearestNodeUrl(point), {
+              signal: AbortSignal.timeout(12_000),
+              headers: {
+                Accept: "application/json",
+              },
+            });
+          const [startResponse, endResponse] = await Promise.all([
+            nearestRequest(startCoordinate),
+            nearestRequest(endCoordinate),
+          ]);
+          const [startNode, endNode] = await Promise.all([
+            readBackendResponse<NearestNodeResponse>(startResponse),
+            readBackendResponse<NearestNodeResponse>(endResponse),
+          ]);
+          if (!startNode.within_threshold)
+            throw new Error(
+              `The start is ${Math.round(startNode.distance_m)} m from the walking network, outside the ${startNode.threshold_m} m limit.`,
+            );
+          if (!endNode.within_threshold)
+            throw new Error(
+              `The destination is ${Math.round(endNode.distance_m)} m from the walking network, outside the ${endNode.threshold_m} m limit.`,
+            );
+
+          setStatus("Calculating shortest and low-crowd routes…");
+          const requestBackendRoute = async (endpoint: string) => {
+            const response = await fetch(endpoint, {
+              method: "POST",
+              signal: AbortSignal.timeout(75_000),
+              headers: {
+                Accept: "application/json",
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                start_node: startNode.node_id,
+                end_node: endNode.node_id,
+              }),
+            });
+            return readBackendResponse<LowCrowdRouteResponse>(response);
+          };
+          const backendResults = Promise.allSettled([
+            requestBackendRoute("/api/routes/low-crowd"),
+            requestBackendRoute("/api/routes"),
+          ]);
           const [lowCrowdResult, shortestResult] = await backendResults;
           lines.current.forEach(({ line }) => line.setMap(null));
           lines.current = [];
@@ -656,6 +675,13 @@ export default function GoogleRouteMap({
           routeMetricsHandler.current?.({
             lowCrowd: metricFor(lowCrowdRoute, lowCrowdPath),
             lowCrowdPending: false,
+            lowCrowdData: lowCrowdRoute
+              ? {
+                  score: lowCrowdRoute.crowd_score,
+                  coverageRatio: lowCrowdRoute.crowd_coverage_ratio,
+                  status: lowCrowdRoute.crowd_data_status,
+                }
+              : undefined,
             alternative: alternativeComparison
               ? alternativeComparison.metric ??
                 metricFor(null, alternativeComparison.path)
@@ -686,19 +712,23 @@ export default function GoogleRouteMap({
         }
         lines.current.forEach(({ line }) => line.setMap(null));
         lines.current = [];
-        const response = await Route.computeRoutes({
-          origin,
-          destination,
-          travelMode: "WALKING",
-          computeAlternativeRoutes: true,
-          fields: [
-            "path",
-            "distanceMeters",
-            "durationMillis",
-            "legs.steps.instructions",
-            "legs.steps.distanceMeters",
-          ],
-        });
+        const response = await withTimeout(
+          Route.computeRoutes({
+            origin,
+            destination,
+            travelMode: "WALKING",
+            computeAlternativeRoutes: true,
+            fields: [
+              "path",
+              "distanceMeters",
+              "durationMillis",
+              "legs.steps.instructions",
+              "legs.steps.distanceMeters",
+            ],
+          }),
+          15_000,
+          "Google walking routes timed out.",
+        );
         if (cancelled || !map.current) return;
         const found =
           response.routes?.filter((route) => route.path?.length) ?? [];
@@ -730,6 +760,10 @@ export default function GoogleRouteMap({
             `${firstStep.instructions}${firstStep.distanceMeters ? ` · ${firstStep.distanceMeters} m` : ""}`,
           );
       } catch (error) {
+        if (cancelled) return;
+        // End the parent loading state even when CityFlow is unavailable.
+        // Any Google metrics already published are preserved by the parent.
+        routeMetricsHandler.current?.({ lowCrowdPending: false });
         setStatus(
           error instanceof Error
             ? error.message
@@ -741,7 +775,7 @@ export default function GoogleRouteMap({
     return () => {
       cancelled = true;
     };
-  }, [origin, destination]);
+  }, [origin, destination, requestId]);
   useEffect(() => {
     sensoryRouteRef.current = sensoryRoute;
     selectedRouteRef.current = selectedRouteId;
@@ -802,69 +836,6 @@ export default function GoogleRouteMap({
       layerCircles.current.forEach((item) => item.setMap(null));
     };
   }, [mapReady, crowdHeatMap, crowdData]);
-  useEffect(
-    () => () => {
-      if (watchId.current !== null)
-        navigator.geolocation.clearWatch(watchId.current);
-      if (positionMarker.current) positionMarker.current.map = null;
-    },
-    [],
-  );
-  async function startNavigation() {
-    if (!navigator.geolocation) {
-      setStatus("This browser does not support live location.");
-      return;
-    }
-    setStatus("Waiting for location permission…");
-    const googleMaps = await loadGoogleMaps();
-    const { AdvancedMarkerElement } = (await googleMaps.importLibrary(
-      "marker",
-    )) as MarkerLibrary;
-    watchId.current = navigator.geolocation.watchPosition(
-      (position) => {
-        const point = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-        };
-        if (map.current) {
-          if (positionMarker.current) {
-            positionMarker.current.position = point;
-          } else {
-            positionMarker.current = new AdvancedMarkerElement({
-              map: map.current,
-              position: point,
-              title: "Your live location",
-            });
-          }
-        }
-        setNavigating(true);
-        setStatus(
-          `GPS active · accuracy ${Math.round(position.coords.accuracy)} m`,
-        );
-      },
-      (error) => {
-        setNavigating(false);
-        setStatus(
-          error.code === 1
-            ? "Location permission was denied."
-            : "Your live location is unavailable.",
-        );
-      },
-      { enableHighAccuracy: true, maximumAge: 3000, timeout: 15000 },
-    );
-  }
-  function stopNavigation() {
-    if (watchId.current !== null) {
-      navigator.geolocation.clearWatch(watchId.current);
-      watchId.current = null;
-    }
-    if (positionMarker.current) {
-      positionMarker.current.map = null;
-      positionMarker.current = null;
-    }
-    setNavigating(false);
-    setStatus("Navigation stopped.");
-  }
   if (!key)
     return (
       <div className="map-visual map-setup">
@@ -917,19 +888,11 @@ export default function GoogleRouteMap({
         animate={{ opacity: 1, y: 0 }}
         className="navigation-overlay"
       >
-        <motion.span
-          animate={
-            navigating && !reduceMotion ? { scale: [1, 1.06, 1] } : undefined
-          }
-          transition={{ duration: 2, repeat: Infinity }}
-          className="turn-icon"
-        >
+        <span className="turn-icon">
           ↑
-        </motion.span>
+        </span>
         <div>
-          <small>
-            {navigating ? "LIVE WALKING NAVIGATION" : "NEXT DIRECTION"}
-          </small>
+          <small>NEXT DIRECTION</small>
           <AnimatePresence mode="wait" initial={false}>
             <motion.strong
               key={instruction}
@@ -942,31 +905,6 @@ export default function GoogleRouteMap({
             </motion.strong>
           </AnimatePresence>
           <div className="navigation-actions">
-            <AnimatePresence mode="wait" initial={false}>
-              {navigating ? (
-                <motion.button
-                  key="stop"
-                  initial={reduceMotion ? false : { opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  whileTap={reduceMotion ? undefined : { scale: 0.96 }}
-                  onClick={stopNavigation}
-                >
-                  Stop navigation
-                </motion.button>
-              ) : (
-                <motion.button
-                  key="start"
-                  initial={reduceMotion ? false : { opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  whileTap={reduceMotion ? undefined : { scale: 0.96 }}
-                  onClick={() => void startNavigation()}
-                >
-                  Start live navigation
-                </motion.button>
-              )}
-            </AnimatePresence>
             <motion.a
               whileHover={reduceMotion ? undefined : { y: -1 }}
               whileTap={reduceMotion ? undefined : { scale: 0.97 }}
