@@ -1,5 +1,5 @@
 "use client";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import GoogleRouteMap, {
   type CalculatedRouteMetric,
   type CalculatedRouteMetrics,
@@ -124,11 +124,7 @@ const routes = [
     ],
   },
 ] as const;
-const prefs = [
-  "Avoid crowds",
-  "Avoid construction",
-  "Simpler crossings",
-];
+const prefs = ["Avoid crowds"];
 const quietBreakPlaces = [
   {
     id: "flagstaff",
@@ -174,6 +170,23 @@ function Mark() {
     </svg>
   );
 }
+function ClockIcon() {
+  return (
+    <svg
+      className="route-time-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
 function Heading({ over, title }: { over: string; title: string }) {
   const reduce = useReducedMotion();
   return (
@@ -195,6 +208,7 @@ function Heading({ over, title }: { over: string; title: string }) {
 }
 export default function Home() {
   const reduceMotion = useReducedMotion();
+  const routeOptionsPanelRef = useRef<HTMLElement>(null);
   const heroPointerX = useMotionValue(0),
     heroPointerY = useMotionValue(0);
   const heroFloatX = useSpring(heroPointerX, {
@@ -209,22 +223,29 @@ export default function Home() {
     });
   const [routeId, setRouteId] =
       useState<(typeof routes)[number]["id"]>("a"),
-    [selectedPrefs, setPrefs] = useState<string[]>(prefs.slice(0, 2)),
-    [from, setFrom] = useState("RMIT University, Melbourne"),
-    [to, setTo] = useState("State Library Victoria, Melbourne"),
-    [journey, setJourney] = useState({
-      origin: "RMIT University, Melbourne",
-      destination: "State Library Victoria, Melbourne",
-    }),
-    [notice, setNotice] = useState(""),
+    [expandedRouteId, setExpandedRouteId] = useState<
+      (typeof routes)[number]["id"] | null
+    >(null),
+    [routeOptionsPanelHeight, setRouteOptionsPanelHeight] = useState<
+      number | null
+    >(null),
+    [selectedPrefs, setPrefs] = useState<string[]>([]),
+    [from, setFrom] = useState(""),
+    [to, setTo] = useState(""),
+    [journey, setJourney] = useState<{
+      origin: string;
+      destination: string;
+    } | null>(null),
+    [, setNotice] = useState(""),
     [crowdData, setCrowdData] = useState<CrowdDensityPoint[]>([]),
-    [crowdStatus, setCrowdStatus] = useState("Loading crowd conditions…"),
-    [dataQualityStatus, setDataQualityStatus] = useState(
-      "Checking sensor freshness…",
-    ),
+    [, setCrowdStatus] = useState("Loading crowd conditions…"),
     [calculatedRoutes, setCalculatedRoutes] =
       useState<CalculatedRouteMetrics | null>(null),
-    [crowdRefresh, setCrowdRefresh] = useState(0);
+    [routingStatus, setRoutingStatus] = useState("Loading Google Maps…"),
+    [routeRequestId, setRouteRequestId] = useState(0);
+  const routingIsActive = /loading|finding|locating|calculating|starting/i.test(
+    routingStatus,
+  );
   const metricForRoute = (id: string): CalculatedRouteMetric | undefined =>
     id === "a"
       ? calculatedRoutes?.lowCrowd
@@ -246,14 +267,20 @@ export default function Home() {
         eta:
           baseRoute.id === "a" && calculatedRoutes?.lowCrowdPending
             ? "Calculating…"
-            : calculatedRoutes
+            : calculatedRoutes || !routingIsActive
               ? "Unavailable"
               : "Calculating…",
         distance: "—",
       };
   const busy = crowdData.some((point) => point.level === "high");
   const quietPlaceDetail = (place: (typeof quietBreakPlaces)[number]) => {
-    if (!crowdData.length) return `${place.amenity} · ${crowdStatus}`;
+    if (!crowdData.length)
+      return {
+        amenity: place.amenity,
+        crowd: "Unavailable",
+        proximity: null,
+        isFresh: false,
+      };
     const nearest = crowdData.reduce((closest, sensor) =>
       distanceBetween(place, sensor) < distanceBetween(place, closest)
         ? sensor
@@ -264,15 +291,17 @@ export default function Home() {
       nearest.level === "moderate"
         ? "Moderate"
         : `${nearest.level[0].toUpperCase()}${nearest.level.slice(1)}`;
-    const freshness =
-      nearest.dataStatus === "fresh"
-        ? "Fresh reading"
-        : nearest.dataStatus === "stale"
-          ? "Stale reading"
-          : "No live reading";
-    return `${place.amenity} · ${level} crowd · ${freshness} · nearest sensor ${sensorDistance} m away${nearest.updatedAt ? ` · observed ${nearest.updatedAt}` : ""}`;
+    return {
+      amenity: place.amenity,
+      crowd: `${level} crowd`,
+      proximity: `${sensorDistance} m from nearest reading`,
+      isFresh: nearest.dataStatus === "fresh",
+    };
   };
+  const quietDataNeedsCaution =
+    !crowdData.length || crowdData.some((point) => point.dataStatus !== "fresh");
   useEffect(() => {
+    if (!journey) return;
     const controller = new AbortController();
     async function loadCrowdConditions() {
       setCrowdStatus("Loading crowd conditions…");
@@ -328,19 +357,6 @@ export default function Home() {
             ? `${points.length} sensor${points.length === 1 ? "" : "s"} updated`
             : "No crowd observations are currently available.",
         );
-        const allConditions = payload.conditions ?? [];
-        const fresh = allConditions.filter(
-          (item) => item.live_status === "fresh",
-        ).length;
-        const stale = allConditions.filter(
-          (item) => item.live_status === "stale",
-        ).length;
-        const noData = allConditions.filter(
-          (item) => item.live_status === "no_data",
-        ).length;
-        setDataQualityStatus(
-          `${fresh} fresh · ${stale} stale · ${noData} no data`,
-        );
       } catch (error) {
         if (controller.signal.aborted) return;
         setCrowdData([]);
@@ -349,12 +365,11 @@ export default function Home() {
             ? error.message
             : "Crowd conditions are unavailable.",
         );
-        setDataQualityStatus("Sensor freshness is unavailable.");
       }
     }
     void loadCrowdConditions();
     return () => controller.abort();
-  }, [crowdRefresh]);
+  }, [journey]);
   const select = (id: (typeof routes)[number]["id"]) => {
     setRouteId(id);
     setNotice("");
@@ -372,9 +387,13 @@ export default function Home() {
       return;
     }
     setCalculatedRoutes(null);
+    setRoutingStatus("Starting route request…");
+    setRouteRequestId((current) => current + 1);
     setJourney({ origin, destination });
     setNotice(`Live route requested for ${origin} to ${destination}.`);
-    document.querySelector("#options")?.scrollIntoView({ behavior: "smooth" });
+    window.requestAnimationFrame(() =>
+      document.querySelector("#options")?.scrollIntoView({ behavior: "smooth" }),
+    );
   };
   const reveal = reduceMotion
     ? {}
@@ -414,7 +433,6 @@ export default function Home() {
             transition={{ duration: 0.4 }}
           >
             <a href="#planner">Planner</a>
-            <a href="#data">Live data</a>
             <a href="#details">Route details</a>
             <a href="#navigation">Navigation</a>
           </motion.nav>
@@ -583,63 +601,66 @@ export default function Home() {
           </motion.form>
         </motion.section>
         <motion.section {...reveal} className="dashboard-grid">
-          <aside className="panel stack" id="data">
-            <Heading over="Live data status" title="Current conditions" />
-            <div className="status-list">
-              <Status
-                warning={crowdData.some((point) => point.level === "high")}
-                title="Pedestrian density"
-                text={
-                  crowdData.some((point) => point.level === "high")
-                    ? `${crowdData.filter((point) => point.level === "high").length} high-crowd sensor area${crowdData.filter((point) => point.level === "high").length === 1 ? "" : "s"}`
-                    : crowdData.length
-                      ? "No high-crowd sensor areas reported"
-                      : crowdStatus
-                }
-              />
-              <Status
-                warning={dataQualityStatus.startsWith("0 fresh")}
-                title="Sensor freshness"
-                text={dataQualityStatus}
-              />
-              <Status
-                calm
-                title="Data confidence"
-                text={notice || crowdStatus}
-              />
-            </div>
-            <button
-              className="quiet-button"
-              onClick={() => {
-                setNotice("");
-                setCrowdRefresh((value) => value + 1);
-              }}
-            >
-              Refresh crowd conditions
-            </button>
-          </aside>
           <section className="map-panel panel">
             <div className="map-toolbar">
               <Heading
                 over="Google Maps · Walking"
                 title={
-                  route.id === "a"
+                  !journey
+                    ? "Plan a route to begin"
+                    : route.id === "a"
                     ? "Recommended low-sensory route"
                     : `Selected ${route.label.toLowerCase()} route`
                 }
               />
-              <span className="route-badge">{route.name}</span>
+              {journey && <span className="route-badge">{route.name}</span>}
             </div>
-            <GoogleRouteMap
-              origin={journey.origin}
-              destination={journey.destination}
-              selectedRouteId={routeId}
-              crowdData={crowdData}
-              onRoutesCalculated={setCalculatedRoutes}
-            />
+            {journey ? (
+              <GoogleRouteMap
+                origin={journey.origin}
+                destination={journey.destination}
+                requestId={routeRequestId}
+                selectedRouteId={routeId}
+                crowdData={crowdData}
+                onRoutingStatus={setRoutingStatus}
+                onRoutesCalculated={(metrics) =>
+                  setCalculatedRoutes((current) => ({
+                    ...(current ?? {}),
+                    ...metrics,
+                  }))
+                }
+              />
+            ) : (
+              <div className="feature-empty-state">
+                Select a start and destination in the planner to view the map.
+              </div>
+            )}
           </section>
-          <aside className="panel stack" id="options">
+          <aside
+            ref={routeOptionsPanelRef}
+            className="panel stack"
+            id="options"
+            data-empty={!journey}
+            style={
+              routeOptionsPanelHeight
+                ? { height: `${routeOptionsPanelHeight}px` }
+                : undefined
+            }
+          >
             <Heading over="Route options" title="Choose what feels easiest" />
+            <p className="route-options-subtitle">
+              3 routes ranked by sensory level
+            </p>
+            <AnimatePresence mode="wait" initial={false}>
+              {expandedRouteId === null ? (
+                <motion.div
+                  key="route-list"
+                  className="route-options-view"
+                  initial={reduceMotion ? false : { opacity: 0, scale: 0.97 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={reduceMotion ? undefined : { opacity: 0, scale: 0.97 }}
+                  transition={{ duration: reduceMotion ? 0 : 0.24 }}
+                >
             <div className="route-list">
               {routes.map((r) => (
                 <motion.button
@@ -648,132 +669,282 @@ export default function Home() {
                   whileTap={reduceMotion ? undefined : { scale: 0.985 }}
                   className={`route-card ${r.id === route.id ? "is-selected" : ""}`}
                   data-risk={r.risk}
-                  onClick={() => select(r.id)}
+                  onClick={() => {
+                    setRouteOptionsPanelHeight(
+                      routeOptionsPanelRef.current?.getBoundingClientRect()
+                        .height ?? null,
+                    );
+                    select(r.id);
+                    setExpandedRouteId(r.id);
+                  }}
                   key={r.id}
                 >
-                  <div>
-                    <h3>
-                      {r.name}
-                      <span className="route-meaning">
-                        <span aria-hidden="true">
-                          {r.risk === "low"
-                            ? "✓"
-                            : r.risk === "medium"
-                              ? "⚠"
-                              : "⛔"}
-                        </span>{" "}
-                        {r.risk === "low"
-                          ? "Recommended"
-                          : r.risk === "medium"
-                            ? "Alternative"
-                            : "High sensory load"}
-                      </span>
-                    </h3>
-                    <p>{r.label}</p>
+                  <div className="route-card-heading">
+                    <span className="route-card-icon" aria-hidden="true">
+                      {r.risk === "low" ? "✦" : r.risk === "medium" ? "↗" : "!"}
+                    </span>
+                    <span className="route-meaning">
+                      {r.risk === "low"
+                        ? "Recommended"
+                        : r.risk === "medium"
+                          ? "Alternative"
+                          : "High sensory load"}
+                    </span>
                   </div>
-                  <strong className="route-meta">
-                    {metricForRoute(r.id)
-                      ? `≈${metricForRoute(r.id)!.estimatedMinutes} min`
-                      : r.id === "a" && calculatedRoutes?.lowCrowdPending
-                        ? "Calculating…"
-                      : calculatedRoutes
-                          ? "Unavailable"
-                          : "Calculating…"}
-                  </strong>
-                  <div className="route-metrics">
-                    {metricForRoute(r.id) && (
+                  <div className="route-card-summary">
+                    <div>
+                      <h3>{r.name}</h3>
+                      <p>
+                        <span className="sensory-dot" aria-hidden="true" />
+                        {r.risk === "medium" ? "Moderate sensory" : r.label}
+                      </p>
+                    </div>
+                    <div className="route-card-journey">
+                      <strong className="route-meta">
+                        <ClockIcon />
+                        {metricForRoute(r.id)
+                          ? `≈${metricForRoute(r.id)!.estimatedMinutes} min`
+                          : r.id === "a" && calculatedRoutes?.lowCrowdPending
+                            ? "Calculating…"
+                            : calculatedRoutes || !routingIsActive
+                              ? "Unavailable"
+                              : "Calculating…"}
+                      </strong>
                       <span>
-                        Distance: {" "}
-                        {(
-                          metricForRoute(r.id)!.distanceMeters / 1000
-                        ).toFixed(1)}{" "}
-                        km
+                        {metricForRoute(r.id)
+                          ? `${(metricForRoute(r.id)!.distanceMeters / 1000).toFixed(1)} km`
+                          : "—"}
                       </span>
-                    )}
-                    {r.metrics.map((m) => {
-                      const tone =
-                        m.includes("high") || m.includes("limited")
-                          ? "metric-high"
-                          : m.includes("mid")
-                            ? "metric-medium"
-                            : m.includes("low") || m.includes("best")
-                              ? "metric-low"
-                              : "";
-                      return (
-                        <span className={tone} key={m}>
-                          {m}
-                        </span>
-                      );
-                    })}
+                    </div>
                   </div>
-                  <span className="route-action">View this route</span>
+                  <div className="route-card-footer">
+                    <div className="route-crowd">
+                      <span className="crowd-icon" aria-hidden="true">●</span>
+                      <span>
+                        <small>Crowd</small>
+                        <strong>
+                          {r.id === "b"
+                            ? "Moderate"
+                            : r.metrics
+                                .find((metric) => metric.startsWith("Crowd:"))
+                                ?.replace("Crowd:", "")
+                                .trim() ?? "Not available"}
+                        </strong>
+                      </span>
+                    </div>
+                    <span className="route-action">Choose this route →</span>
+                  </div>
                 </motion.button>
               ))}
             </div>
+            <div className="routing-debug" role="status" aria-live="polite">
+              <strong>Routing diagnostic</strong>
+              <span>{routingStatus}</span>
+            </div>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key={`route-detail-${expandedRouteId}`}
+                  className="route-option-detail"
+                  data-risk={route.risk}
+                  initial={reduceMotion ? false : { opacity: 0, scale: 0.97 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={reduceMotion ? undefined : { opacity: 0, scale: 0.97 }}
+                  transition={{ duration: reduceMotion ? 0 : 0.24 }}
+                >
+                  <button
+                    type="button"
+                    className="route-detail-back"
+                    onClick={() => setExpandedRouteId(null)}
+                  >
+                    ← Back to routes
+                  </button>
+                  <div className="route-detail-header">
+                    <div>
+                      <span className="route-meaning">
+                        {route.risk === "low"
+                          ? "Recommended"
+                          : route.risk === "medium"
+                            ? "Alternative"
+                            : "High sensory load"}
+                      </span>
+                      <h3>{route.name}</h3>
+                      <p>
+                        <span className="sensory-dot" aria-hidden="true" />
+                        {route.risk === "medium"
+                          ? "Moderate sensory"
+                          : route.label}
+                      </p>
+                    </div>
+                    <div className="route-card-journey">
+                      <strong className="route-meta">
+                        <ClockIcon />
+                        {route.eta}
+                      </strong>
+                      <span>{route.distance}</span>
+                    </div>
+                  </div>
+                  <p className="route-detail-summary">{route.summary}</p>
+                  <div className="route-detail-features">
+                    {route.scores
+                      .filter(
+                        (score) =>
+                          route.id !== "a" ||
+                          (score[0] !== "Fewer construction points" &&
+                            score[0] !== "More open-space nearby"),
+                      )
+                      .map((score, index) => (
+                      <article key={score[0]}>
+                        <span className="score-index">{index + 1}</span>
+                        <div>
+                          <h4>{score[0]}</h4>
+                          <p>{score[1]}</p>
+                        </div>
+                        <strong>{score[2]}</strong>
+                      </article>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </aside>
         </motion.section>
-        <motion.section {...reveal} className="details-grid" id="details">
-          <article className="panel route-detail-card">
-            <Heading over="Recommended route" title={route.name} />
-            <span className="soft-pill">{route.label}</span>
-            <p>{route.summary}</p>
-            <div className="score-breakdown">
-              {route.scores.map((s, i) => (
-                <article className={`score-item ${s[3]}`} key={s[0]}>
-                  <span className="score-index">{i + 1}</span>
-                  <div>
-                    <h3>{s[0]}</h3>
-                    <p>{s[1]}</p>
-                  </div>
-                  <strong>{s[2]}</strong>
-                </article>
-              ))}
-            </div>
-          </article>
-          <article className="panel" id="navigation">
-            <Heading over="Navigation in progress" title={route.nav[0]} />
-            <div className="navigation-card">
-              <p className="step-label">Next step</p>
-              <h3>{route.nav[1]}</h3>
-              <p>{route.nav[2]}</p>
-              <div className="progress-row">
-                <span>
-                  <strong>{route.eta}</strong> remaining
+        <motion.section {...reveal} className="details-grid details-grid-compact" id="details">
+          <article className="panel" id="navigation" data-empty={!journey}>
+            <div className="navigation-panel-header">
+              <div>
+                <Heading
+                  over="Navigation in progress"
+                  title={journey ? route.nav[0] : "Route guidance"}
+                />
+                <span className="navigation-sensory-badge">
+                  <span aria-hidden="true">◆</span> {route.label} route
                 </span>
-                <span>
-                  <strong>{route.distance}</strong> remaining
+              </div>
+              <div className="navigation-reassurance">
+                <span className="navigation-mini-icon" aria-hidden="true">⌁</span>
+                <strong>
+                  {routeId === "a"
+                    ? "You're on the calmer route"
+                    : routeId === "b"
+                      ? "You're following the alternative route"
+                      : "You're following the faster route"}
+                </strong>
+              </div>
+            </div>
+            <div className="navigation-next-card">
+              <span className="navigation-direction-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5 19 19 5M10 5h9v9" /></svg>
+              </span>
+              <div className="navigation-next-copy">
+                <p className="step-label">Next step</p>
+                <h3>{route.nav[1]}</h3>
+                <p>{route.nav[2]}</p>
+              </div>
+              <div className="navigation-progress-bar">
+                <span className="navigation-progress-item">
+                  <ClockIcon />
+                  <span><strong>{route.eta}</strong><small>remaining</small></span>
+                </span>
+                <span className="navigation-progress-item">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></svg>
+                  <span><strong>{route.distance}</strong><small>remaining</small></span>
                 </span>
               </div>
             </div>
-            <AnimatePresence>
-              {busy && (
-                <motion.div
-                  initial={reduceMotion ? false : { opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="reroute-alert"
-                >
-                  <p className="step-label">Calm reroute available</p>
-                  <h3>The next section is busier than usual.</h3>
-                  <p>
-                    A quieter alternative adds 3 min and passes through an open
-                    area.
-                  </p>
+            <motion.div
+              initial={reduceMotion ? false : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: reduceMotion ? 0 : 0.2 }}
+              className="navigation-route-status"
+              data-route={routeId}
+            >
+              <span className="navigation-heart-icon" aria-hidden="true">♡</span>
+              <div>
+                <p className="step-label">
+                  {routeId === "a"
+                    ? "Calmer route active"
+                    : routeId === "b"
+                      ? "Alternative route active"
+                      : "Fastest route active"}
+                </p>
+                <h3>
+                  {routeId === "a"
+                    ? "You are on the calmer route."
+                    : routeId === "b"
+                      ? "You are following the alternative route."
+                      : "You are following the faster but busier route."}
+                </h3>
+                <p>
+                  {routeId === "a"
+                    ? "Continue following the recommended low-sensory route."
+                    : route.summary}
+                </p>
+                {busy && routeId !== "a" && (
                   <button
                     className="secondary-action"
                     onClick={() => {
-                      select("b");
-                      setNotice("Switched to the calmer live-data option.");
+                      select("a");
+                      setNotice("Switched to the recommended calmer Route A.");
+                      document
+                        .querySelector(".map-panel")
+                        ?.scrollIntoView({ behavior: "smooth", block: "center" });
                     }}
                   >
                     Switch to calmer route
                   </button>
-                </motion.div>
-              )}
-            </AnimatePresence>
+                )}
+              </div>
+              <div className="navigation-landscape" aria-hidden="true">
+                <svg viewBox="0 0 260 150" role="presentation">
+                  <rect width="260" height="150" rx="18" fill="#dfeef7" />
+                  <circle cx="213" cy="31" r="14" fill="#f1d69a" />
+                  <path d="M0 84c39-29 76-29 113 2 40-25 91-25 147 2v62H0Z" fill="#b8d8c2" />
+                  <path d="M0 109c49-20 96-12 132 9 43-23 87-23 128-7v39H0Z" fill="#8fbea2" />
+                  <path d="M116 150c3-28 15-55 36-82 8 5 13 12 16 20-16 23-26 43-29 62Z" fill="#f7ecd1" />
+                  <g fill="#507f6b">
+                    <rect x="40" y="73" width="5" height="42" rx="2" />
+                    <circle cx="42" cy="67" r="17" />
+                    <rect x="205" y="77" width="5" height="41" rx="2" />
+                    <circle cx="207" cy="70" r="16" />
+                  </g>
+                  <path d="M145 55a13 13 0 0 1 26 0c0 9-13 22-13 22s-13-13-13-22Z" fill="#6d91b8" />
+                  <circle cx="158" cy="55" r="4" fill="#fff" />
+                  <path d="M22 31c8-9 20-8 26 0 7-5 17-1 18 7H16c0-4 2-6 6-7Z" fill="#fff" opacity=".78" />
+                </svg>
+              </div>
+            </motion.div>
+            <div className="navigation-quiet-strip">
+              <span className="navigation-quiet-icon" aria-hidden="true">☼</span>
+              <div><strong>Need a break later?</strong><span>Quiet break spots are shown below.</span></div>
+              <button
+                type="button"
+                onClick={() =>
+                  document
+                    .querySelector("#quiet-break-support")
+                    ?.scrollIntoView({ behavior: "smooth", block: "center" })
+                }
+              >
+                View quiet break spots →
+              </button>
+            </div>
           </article>
-          <article className="panel quiet-space-card">
-            <Heading over="Quiet break support" title="Need a quiet break?" />
+        </motion.section>
+        <motion.section
+          {...reveal}
+          className="panel quiet-space-card quiet-support-final"
+          id="quiet-break-support"
+          data-empty={!journey}
+        >
+          <div className="support-heading-row">
+            <span className="support-heading-icon quiet" aria-hidden="true">
+              ♧
+            </span>
+            <div>
+              <Heading over="Quiet break support" title="Need a quiet break?" />
+            </div>
+          </div>
+          <div className="quiet-place-grid">
             {quietBreakPlaces.map((place) => (
               <Place
                 name={place.name}
@@ -781,52 +952,30 @@ export default function Home() {
                 key={place.id}
               />
             ))}
-          </article>
+          </div>
+          {quietDataNeedsCaution && (
+            <p className="quiet-data-note">
+              These suggestions are based on general information and may not
+              reflect real-time crowd levels.
+            </p>
+          )}
         </motion.section>
       </main>
     </>
   );
 }
-function Status({
-  warning = false,
-  calm = false,
-  title,
-  text,
+function Place({
+  name,
+  detail,
 }: {
-  warning?: boolean;
-  calm?: boolean;
-  title: string;
-  text: string;
+  name: string;
+  detail: {
+    amenity: string;
+    crowd: string;
+    proximity: string | null;
+    isFresh: boolean;
+  };
 }) {
-  const reduce = useReducedMotion();
-  return (
-    <motion.article
-      whileHover={reduce ? undefined : { y: -2 }}
-      transition={{ duration: 0.18 }}
-    >
-      <motion.span
-        animate={reduce ? undefined : { scale: [1, 1.12, 1] }}
-        transition={{ duration: 0.35 }}
-        className={`status-dot ${warning ? "warning" : calm ? "calm" : "good"}`}
-      />
-      <div>
-        <h3>{title}</h3>
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.p
-            key={text}
-            initial={reduce ? false : { opacity: 0, y: 3 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={reduce ? undefined : { opacity: 0 }}
-            transition={{ duration: reduce ? 0 : 0.2 }}
-          >
-            {text}
-          </motion.p>
-        </AnimatePresence>
-      </div>
-    </motion.article>
-  );
-}
-function Place({ name, detail }: { name: string; detail: string }) {
   const reduce = useReducedMotion();
   return (
     <motion.div
@@ -834,8 +983,13 @@ function Place({ name, detail }: { name: string; detail: string }) {
       whileHover={reduce ? undefined : { x: 3 }}
       transition={{ duration: 0.2, ease: "easeOut" }}
     >
+      <span className="quiet-place-icon" aria-hidden="true">♧</span>
       <h3>{name}</h3>
-      <p>{detail}</p>
+      <div className="quiet-place-tags">
+        <span>{detail.amenity}</span>
+        <span>{detail.crowd}</span>
+      </div>
+      {detail.proximity && <p>⌖ {detail.proximity}</p>}
     </motion.div>
   );
 }
